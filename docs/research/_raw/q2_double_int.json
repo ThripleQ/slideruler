@@ -1,0 +1,65 @@
+[
+  {
+    "url": "https://blog.dmsystemsgroup.co.uk",
+    "name": "The necessity of accelerometer recalibration for measurement",
+    "snippet": "Regular accelerometer recalibration is a fundamental requirement for maintaining measurement accuracy, safeguarding operational performance and protecting ...",
+    "host_name": "blog.dmsystemsgroup.co.uk",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://iopscience.iop.org",
+    "name": "Analysis of the Accuracy and Usefulness of MEMS",
+    "snippet": "by A Ciecko · 2019 · Cited by 3 — According to El-Sheimy, the erroneous indication of the accelerometer leads to a linear error after the first integration and to a square error after the second ... Read more",
+    "host_name": "iopscience.iop.org",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://forum.arduino.cc",
+    "name": "Problem of False Positive for vertical motion with",
+    "snippet": "Jun 11, 2019 — It gives an error of +/- 0.1 m/s without the bandpass filter to remove noise and drift . it would deal with drift and noise errors as well. +/-0 ...",
+    "host_name": "forum.arduino.cc",
+    "rank": 2,
+    "date": "Jun 11, 2019",
+    "favicon": ""
+  },
+  {
+    "url": "http://www.tri-odu.org",
+    "name": "Speed Estimation Using Smartphone Accelerometer Data 1 2",
+    "snippet": "by I Ustun · Cited by 14 — This paper demonstrates how speed can be estimated from smartphone accelerometer data and 2 calibrated by using the stop and start points of a vehicle.",
+    "host_name": "www.tri-odu.org",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.researchgate.net",
+    "name": "The errors between the calibrated accelerometer",
+    "snippet": "To improve the measurement accuracy of accelerometer components, it is necessary to calibrate and compensate for linear errors , including zero biases, scale ... Read more",
+    "host_name": "www.researchgate.net",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://discussions.unity.com",
+    "name": "Experiencing strange drift using Android Accelerometers",
+    "snippet": "Feb 5, 2014 — The accelerometers are almost never perfectly centered. Often precision can also be improved by “drawing 8's” in the air while holding the ...",
+    "host_name": "discussions.unity.com",
+    "rank": 5,
+    "date": "Feb 5, 2014",
+    "favicon": ""
+  },
+  {
+    "url": "https://patents.google.com/patent/WO2014110672A1/en",
+    "name": "Method and apparatus for determination of misalignment",
+    "snippet": "Jul 24, 2014 — The present disclosure relates to a method and apparatus for determining the misalignment between a device and a pedestrian, ...",
+    "host_name": "patents.google.com",
+    "rank": 6,
+    "date": "Jul 24, 2014",
+    "favicon": ""
+  }
+]

@@ -1,0 +1,47 @@
+[
+  {
+    "url": "https://www.researchgate.net",
+    "name": "'Watkins' & 'Watkins2.0': Smart Phone Applications (Apps",
+    "snippet": "Aug 17, 2024 — Watkins2.0 did, however, have an 87.5% accuracy in measuring the distance covered with error of ± 0.50 meter.",
+    "host_name": "www.researchgate.net",
+    "rank": 0,
+    "date": "Aug 17, 2024",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.static.tu.berlin",
+    "name": "Abschlussarbeit Markus Hädrich",
+    "snippet": "Sep 9, 2015 — Verwendung von Accelerometerdaten. Accelerometer des iPhone 5s „ Core Motion Framework Reference.” 102 pages",
+    "host_name": "www.static.tu.berlin",
+    "rank": 1,
+    "date": "Sep 9, 2015",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.cnblogs.com",
+    "name": "iOS加速计和陀螺仪- itlover2013",
+    "snippet": "Jan 5, 2021 — iOS 系统提供了加速计和陀螺仪支持，如果 iOS 设备提供了这些硬件支持， iOS 即可通过 CoreMotion 框架提供的加速计来获取设备当前的加速度数据、陀螺仪数据、所 ... Read more",
+    "host_name": "www.cnblogs.com",
+    "rank": 2,
+    "date": "Jan 5, 2021",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.tokendh.com",
+    "name": "core-motion（核心运动） Skills下载安装命令和教程 - Token导航",
+    "snippet": "6 days ago — 提供CMMotionManager、CMAltimeter 与CMPedometer 的使用指南。 安装方式：GitHub，命令为npx skills add https://github.com/dpearson2699/swift- ios - ... Read more",
+    "host_name": "www.tokendh.com",
+    "rank": 3,
+    "date": "Sep 28, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://dokumen.pub",
+    "name": "Building Enterprise IoT Applications [1 ed.] 0367173859,",
+    "snippet": "Core Motion provides following device events: • Accelerometer • Gyroscope • Pedometer • Magnetometer • Barometer Like Android Sensor Framework, iOS Core Motion ... Read more",
+    "host_name": "dokumen.pub",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  }
+]

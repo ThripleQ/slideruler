@@ -1,0 +1,74 @@
+[
+  {
+    "url": "https://www.researchgate.net",
+    "name": "A simplified block diagram of the DCM IMU filter. The",
+    "snippet": "In this paper, we have compared three IMU processing techniques freely available: MAH ( Mahony et al., 2009), MAD ( Madgwick et al., 2011) and DCM (Hyyti and ... Read more",
+    "host_name": "www.researchgate.net",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.scilit.com",
+    "name": "Attitude detection of spherical joint actuator based on",
+    "snippet": "The experimental results demonstrate that the AMWF offers faster computation speed compared to the EKF and higher accuracy than the FCF and MWF.",
+    "host_name": "www.scilit.com",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.academia.edu",
+    "name": "Design of a Modified Madgwick Filter for Quaternion-Based",
+    "snippet": "This paper presents a quaternion-based modified Madgwick filter for real-time estimation of rigid body orientations using attitude and heading reference ... Read more",
+    "host_name": "www.academia.edu",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://scispace.com",
+    "name": "an-extended-complementary-filter-for-full-body-marg-",
+    "snippet": "In this investigation, we present a new orientation estimation algorithm that builds upon the principles of a complementary filter , dubbed the extended ... Read more",
+    "host_name": "scispace.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://iopscience.iop.org",
+    "name": "Multi-sensory data fusion for high performance attitude",
+    "snippet": "by ME Hanafi · 2019 · Cited by 7 — The study presented that the Complementary filter introduces better efficiency than Mahony filter in case of stationary situations and steady flight.",
+    "host_name": "iopscience.iop.org",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.semanticscholar.org",
+    "name": "Experimental Comparison of Sensor Fusion Algorithms for",
+    "snippet": "Two algorithms based on the gradient descent method and the algorithm based on a nonlinear complementary filter are compared to a standard Extended Kalman ...",
+    "host_name": "www.semanticscholar.org",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.scribd.com",
+    "name": "Modified Madgwick Filter for AHRS | PDF | Attitude Control",
+    "snippet": "This paper presents a quaternion-based modified Madgwick filter for real-time estimation of rigid body orientations using attitude and heading reference system ...",
+    "host_name": "www.scribd.com",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://arxiv.org",
+    "name": "RIANN—A Robust Neural Network Outperforms Attitude",
+    "snippet": "Nov 25, 2021 — We compare the performance of RIANN to the performance of two attitude estimation filters, which are the best performing attitude estimators ... Read more",
+    "host_name": "arxiv.org",
+    "rank": 7,
+    "date": "Nov 25, 2021",
+    "favicon": ""
+  }
+]

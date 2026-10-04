@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://pmc.ncbi.nlm.nih.gov",
+    "name": "Identification of Capacitive MEMS Accelerometer Structure",
+    "snippet": "by V Benevicius · 2013 · Cited by 34 — The accelerometers bias stability and hysteresis values are specified as 0.15% of FSO each. Finally the accelerometer should have a response time of less than ...",
+    "host_name": "pmc.ncbi.nlm.nih.gov",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.researchgate.net",
+    "name": "MEMS gyroscope parameter values. | Download Table",
+    "snippet": "Under this scheme, the gyroscope achieves zero- bias stability of 0.3118 °/h and angle random walk of 0.2443 °/h/√Hz. higher resonant modes of MEMS ...",
+    "host_name": "www.researchgate.net",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://athene-forschung.unibw.de",
+    "name": "2015 DGON Inertial Sensors and Systems - Athene Forschung",
+    "snippet": "by M Bochkati · Cited by 3 — MEMS suffer from bias instability and noise levels that can completely mask the earth's reference signal … some noise coefficient, such VRW/ARW and Bias ...",
+    "host_name": "athene-forschung.unibw.de",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.mdpi.com",
+    "name": "Using Inertial Sensors in Smartphones for Curriculum",
+    "snippet": "by X Niu · 2015 · Cited by 24 — The valley bottom points indicate that the accelerometer bias instability is about 30 m Gal. Coefficients of noises contained in the sensor outputs. MEMS gyros ...",
+    "host_name": "www.mdpi.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://amironic.co.il",
+    "name": "Gyro and IMU for Advanced Control Systems",
+    "snippet": "Feb 8, 2026 — MEMS Gyroscope … review Noise Density , ARW, Bias Stability , Attempts to reduce noise through aggressive filtering often improve RMS values but ...",
+    "host_name": "amironic.co.il",
+    "rank": 4,
+    "date": "Feb 8, 2026",
+    "favicon": ""
+  },
+  {
+    "url": "https://pdfs.semanticscholar.org",
+    "name": "Suitability of Smartphone Inertial Sensors for Real-Time",
+    "snippet": "by A Kos · 2016 · Cited by 74 — The variations in the gyroscope bias due to sensor noise do not exceed 30 mdeg/s, and the gyroscope bias drift after one hour is approximately ... Read more",
+    "host_name": "pdfs.semanticscholar.org",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://dataintelo.com",
+    "name": "MEMS Accelerometer for Mobile Market",
+    "snippet": "The MEMS accelerometer for mobile market was valued at $3.8 billion in 2025 and is projected to reach $7.6 billion by 2034, growing at a CAGR of 8.1%.",
+    "host_name": "dataintelo.com",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.analog.com",
+    "name": "Dynamic Angle Estimation with Inertial MEMs",
+    "snippet": "Total noise = Noise Density x Noise. Noise density = 0.105 mg/Hz1/2 . Ideal accelerometer output = 1g x sin(30) = 0.5g 29 pages",
+    "host_name": "www.analog.com",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://industrialmonitordirect.com",
+    "name": "Selecting and Integrating MEMS IMUs for Robot Navigation",
+    "snippet": "Sep 10, 2026 — The rated in-run bias stability is 25°/hr, but in field conditions, drift is usually dominated by temperature effects on the bias rather than ... Read more",
+    "host_name": "industrialmonitordirect.com",
+    "rank": 8,
+    "date": "Sep 10, 2026",
+    "favicon": ""
+  }
+]

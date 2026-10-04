@@ -1,0 +1,92 @@
+[
+  {
+    "url": "https://github.com/topics/imu-sensor",
+    "name": "imu-sensor · GitHub Topics",
+    "snippet": "A collection of datasets, papers, and resources for Generalizable Human Activity Recognition and IMU sensing. domain har accelerometer. Odometry deep-learning ...",
+    "host_name": "github.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/orgs/autowarefoundation/discussions/4913",
+    "name": "What about IMU integration to increase localization",
+    "snippet": "IMU sensors can measure both linear acceleration and angular velocity, IMU acceleration also has bias, causing estimated position to drift over ...",
+    "host_name": "github.com",
+    "rank": 1,
+    "date": "Jun 24, 2024",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/Wojtek120/IMU-velocity-and-displacement-measurements",
+    "name": "Wojtek120/IMU-velocity-and-displacement-measurements",
+    "snippet": "The device was created to measure training parameters in powerlifting - speed and displacement using an accelerometer and gyroscope - IMU.",
+    "host_name": "github.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://forum.arduino.cc/t/measuring-distances-with-the-imu-sensor-mpu6050/237391",
+    "name": "Measuring distances with the IMU sensor MPU6050",
+    "snippet": "Inexpensive IMUs can tell you what direction they are moving and if you know the velocity, it is easy to calculate distance.",
+    "host_name": "forum.arduino.cc",
+    "rank": 3,
+    "date": "May 31, 2014",
+    "favicon": ""
+  },
+  {
+    "url": "https://arxiv.org/html/2501.15659v1",
+    "name": "AirIO: Learning Inertial Odometry with Enhanced IMU",
+    "snippet": "The IMU accelerometer measures the net force per unit mass acting on the sensor. Due to the measurement mechanism, it measures not only the ...",
+    "host_name": "arxiv.org",
+    "rank": 4,
+    "date": "Jan 26, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/topics/imu-sensor?l=matlab&o=asc&s=stars",
+    "name": "imu-sensor · GitHub Topics",
+    "snippet": "This repository contains different algorithms for attitude estimation (roll, pitch and yaw angles) from IMU sensors data: accelerometer, magnetometer and ...",
+    "host_name": "github.com",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.researchgate.net/post/What_options_are_available_for_measuring_distances_as_accurately_as_possible_using_an_IMU_system_with_accelerometer_gyroscope_and_magnetometer",
+    "name": "What options are available for measuring distances as",
+    "snippet": "I would like to develop a system that runs on a microcontroller in a remote controlled submarine. While the submarine moves freely in the water, it ...",
+    "host_name": "www.researchgate.net",
+    "rank": 6,
+    "date": "Feb 25, 2022",
+    "favicon": ""
+  },
+  {
+    "url": "https://facebookresearch.github.io/projectaria_tools/docs/tech_insights/sensor_measurement_model",
+    "name": "Sensor Measurement Model | Aria Gen 1 Docs",
+    "snippet": "This page provides an overview of how Project Aria device sensor measurements are modeled for IMU, magnetometer, barometer and audio.",
+    "host_name": "facebookresearch.github.io",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.youtube.com/watch?v=RUpNuuojN5Q",
+    "name": "IMU Motion Tracking UPGRADE: Python Processing with",
+    "snippet": "The headache of wired IMU projects is over! In this video, we ditch the slow serial port and upgrade our setup to a fast wireless motion ...",
+    "host_name": "www.youtube.com",
+    "rank": 8,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://pages.github.coecis.cornell.edu/ir93/fast-robots/lab4.html",
+    "name": "Lab 4: Recording IMU data.",
+    "snippet": "Connecting the IMU was simple; the port leftover from the TOF sensors on the QWIK multiport adapter could be used directly. No address change was required, ...",
+    "host_name": "pages.github.coecis.cornell.edu",
+    "rank": 9,
+    "date": "",
+    "favicon": ""
+  }
+]

@@ -1,0 +1,83 @@
+[
+  {
+    "url": "https://digital-library.theiet.org",
+    "name": "Deep neural network‐based adaptive zero‐velocity",
+    "snippet": "by L Zhang · 2022 · Cited by 10 — The zero ‐ velocity update ( ZUPT ) method is an effective way to reduce accumulated velocity errors of pedestrian navigation systems (PNSs). Read more",
+    "host_name": "digital-library.theiet.org",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://apps.dtic.mil",
+    "name": "Development of a Testbed for Foot Mounted Based Pedestrian",
+    "snippet": "by JE Eldridge · 2020 · Cited by 1 — Applications of zero-velocity detector and Kalman filter in zero velocity update for inertial navigation system , 2015. 8. Eric Foxlin ... Read more",
+    "host_name": "apps.dtic.mil",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://nottingham-repository.worktribe.com",
+    "name": "Understanding the performance of zero velocity updates in",
+    "snippet": "Zero Velocity Update (ZUPT ) is an important update to aid an autonomous inertial pedestrian navigation. The objectives of this paper are to briefly revisit.",
+    "host_name": "nottingham-repository.worktribe.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.mdpi.com",
+    "name": "A Novel Pedestrian Dead Reckoning Algorithm for Multi",
+    "snippet": "by L Xu · 2019 · Cited by 53 — In this paper, we proposed a novel pedestrian dead reckoning algorithm with the built-in inertial sensors for multi-mode smartphone applications ... Read more",
+    "host_name": "www.mdpi.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "http://ipin-conference.org",
+    "name": "A robust pedestrian navigation algorithm with low cost IMU",
+    "snippet": "by Y Li · 2012 · Cited by 35 — Abstract— Zero velocity update ( ZUPT ) is an effective way for pedestrian navigation in a GPS (Global Positioning System) denied environment. Read more 7 pages",
+    "host_name": "ipin-conference.org",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.espublisher.com",
+    "name": "A Review of Smartphone-Based Indoor Pedestrian Dead",
+    "snippet": "In contrast to foot-mounted inertial navigation systems that utilize Zero - Velocity Updates ( ZUPT ) to intermittently mitigate drift, smartphone -based pedestrian ...",
+    "host_name": "www.espublisher.com",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://pos.sissa.it",
+    "name": "GPS/INS Integrated Navigation System",
+    "snippet": "velocity update ( ZUPT ) for effectively minimizing the drift [6]. Zhang et al. introduced a handheld inertial ... In pedestrian navigation systems, dead - reckoning ...",
+    "host_name": "pos.sissa.it",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.tandfonline.com",
+    "name": "Low-complexity online correction and calibration of",
+    "snippet": "by F Hölzke · 2019 · Cited by 10 — We describe our localization method using zero velocity updates to accurately compute the length of individual steps and a Madgwick filter to ... Read more",
+    "host_name": "www.tandfonline.com",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.researchgate.net",
+    "name": "The inertial navigation system (INS)-based foot-mounted",
+    "snippet": "The inertial-based PDR (Pedestrian Dead Reckoning) system assisted by ZUPT (Zero-velocity Update) algorithm has been widely researched, as it can ... Read more",
+    "host_name": "www.researchgate.net",
+    "rank": 8,
+    "date": "",
+    "favicon": ""
+  }
+]

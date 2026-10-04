@@ -1,0 +1,47 @@
+[
+  {
+    "url": "https://github.com",
+    "name": "Madgwick: Attitude Value Drift and Yaw Alignment Issues #47",
+    "snippet": "Aug 3, 2021 — The Madgwick filter has a Dt parameter that corresponds to the sampling rate. Its default value in the current AHRS Magdwick class is 0.01 ... Read more",
+    "host_name": "github.com",
+    "rank": 0,
+    "date": "Aug 3, 2021",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.mathworks.com",
+    "name": "Why don't the Sensor Fusion Toolbox IMU filters",
+    "snippet": "Jan 18, 2021 — To restore the initial states and covariances. The ahrsfilter and imufilter are System objects for which this streaming behavior is fundamental. Read more",
+    "host_name": "www.mathworks.com",
+    "rank": 1,
+    "date": "Jan 18, 2021",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.sciencepubco.com",
+    "name": "Performance Comparison of AHRS Algorithm for Quad",
+    "snippet": "The performance of the Madgwick algorithm and the Mahony algorithm was tested in both static and dynamic states. Finally, we calculated the computation speed of ... Read more",
+    "host_name": "www.sciencepubco.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://kr.mathworks.com",
+    "name": "Estimate Orientation Using AHRS Filter and IMU Data in",
+    "snippet": "This example shows how to stream IMU data from sensors connected to Arduino® board and estimate orientation using AHRS filter and IMU sensor.",
+    "host_name": "kr.mathworks.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.academia.edu",
+    "name": "Figure 2 - from Design of a Modified Madgwick Filter for",
+    "snippet": "This paper presents a quaternion-based modified Madgwick filter for real-time estimation of rigid body orientations using attitude and heading reference system ...",
+    "host_name": "www.academia.edu",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  }
+]

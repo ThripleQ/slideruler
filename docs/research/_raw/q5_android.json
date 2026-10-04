@@ -1,0 +1,29 @@
+[
+  {
+    "url": "https://github.com",
+    "name": "Change sample rate for sensors broadcast · Issue #3",
+    "snippet": "Jan 4, 2025 — As a best practice, you should specify the largest delay . Once the sampling rate (delay) is set, it is generally recommended not to change it. ...",
+    "host_name": "github.com",
+    "rank": 0,
+    "date": "Jan 4, 2025",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.scribd.com",
+    "name": "Overview of Android Sensor Devices | PDF",
+    "snippet": "It lists various types of sensors , their manufacturers, versions, types, permissions, and operational characteristics such as sampling rates and batching ...",
+    "host_name": "www.scribd.com",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.researchgate.net",
+    "name": "The sampling rate is not constant, how to improve it?",
+    "snippet": "Jul 8, 2018 — to overcome the problem you have to read sensor data at a higher frequency . I recommend using interrupt driven reads.",
+    "host_name": "www.researchgate.net",
+    "rank": 2,
+    "date": "Jul 8, 2018",
+    "favicon": ""
+  }
+]
