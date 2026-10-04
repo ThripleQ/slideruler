@@ -10,8 +10,10 @@
 校准(静止2s) → 100Hz采集 → 姿态解算 → 去重力 → 一维约束 → ZUPT零速修正 → 二次积分 → 距离
 ```
 
-## 当前状态：资料搜集阶段
+## 当前状态：资料搜集阶段（已完成核心资料包）
 
-调研笔记在 [`docs/research/`](docs/research/)——从"双重积分为什么会漂"到"手机 IMU 实测噪声数字"到"最接近的先例（同管线实测 12% 误差）"，一页速览见 [docs/research/README.md](docs/research/README.md)。
+- **想弄懂这个项目的技术问题** → 从 [`docs/research/00-why-this-is-hard.md`](docs/research/00-why-this-is-hard.md) 开始（为什么难、靠什么救、精度算账）
+- **想知道怎么一步步实现**（采什么数据、数据有什么缺陷、每步怎么验证）→ [`docs/implementation-guide.md`](docs/implementation-guide.md)（九阶段小白向全流程指南）
+- 调研笔记总索引：[docs/research/README.md](docs/research/README.md)——从"双重积分为什么会漂"到"手机 IMU 实测噪声数字"到"最接近的先例（同管线实测 12% 误差）"
 
 下一阶段：合成数据仿真验证算法管线 → Android / Kotlin / Compose 原型。

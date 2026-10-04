@@ -1,6 +1,6 @@
 # 03 · 手机 IMU 特性实测数字
 
-主来源：Niu et al. 2015, *Using Inertial Sensors in Smartphones for Curriculum Experiments of Inertial Navigation Technology*, Education Sciences 5(1):26（正文已抓，`_raw/p5_niu.json`）。对某 Android 手机做的完整 Allan 方差分析，**数字与我们选型直接相关**。
+主来源：Niu et al. 2015, *Using Inertial Sensors in Smartphones for Curriculum Experiments of Inertial Navigation Technology*, Education Sciences 5(1):26（正文已抓，`_raw/niu2015-education-sciences.json`）。对某 Android 手机做的完整 Allan 方差分析，**数字与我们选型直接相关**。
 
 ## 实测噪声系数（Allan 方差，Table 3）
 

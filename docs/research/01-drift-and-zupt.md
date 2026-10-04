@@ -11,9 +11,9 @@
   δa = g·sin(θ) ≈ 9.81·θ；**1° 姿态误差 ≈ 0.17 m/s² 假加速度**——比传感器零偏大一个量级
   → 这就是为什么姿态解算精度是一维测距的命门，而不是传感器本身
 
-社区共识（Arduino MPU6050 论坛，2014，原帖抓取件 `_raw/p4_arduino.json`）：
+社区共识（Arduino MPU6050 论坛，2014，原帖抓取件 `_raw/arduino-mpu6050-forum.json`）：
 
-> "In principle it is possible to estimate the velocity and distance from the acceleration by double integration, but in practice with hobby-type accelerometers, this works for only very short distances before the estimate becomes hopelessly inaccurate." —— 指向 CH Robotics 的经典解释文（chrobotics.com/library/accel-position-velocity，值得整个读一遍，讲清了为什么手机 IMU 只能做"短时 + 边界约束"的位移）
+> "In principle it is possible to estimate the velocity and distance from the acceleration by double integration, but in practice with hobby-type accelerometers, this works for only very short distances before the estimate becomes hopelessly inaccurate." —— 指向 CH Robotics 的经典解释文。⚠️ 抓取时（2026-10-05）`chrobotics.com` 域名已易主（返回无关内容），原文不可达；其核心论证（双重积分误差平方爆炸、只有短时+边界约束可用）与本笔记推导一致，已转述于上
 
 ## ZUPT（零速修正）文献
 

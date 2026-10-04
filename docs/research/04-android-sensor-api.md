@@ -1,6 +1,6 @@
 # 04 · Android 传感器 API 笔记
 
-来源：developer.android.com 官方文档（*Motion sensors*，正文已抓 `_raw/p_b54a06.json`；*Reporting modes* from source.android.com，`_raw/p_report.json`）。抓取日 2026-10-05。
+来源：developer.android.com 官方文档（*Motion sensors*，正文已抓 `_raw/android-motion-sensors.json`；*Reporting modes* from source.android.com，`_raw/android-reporting-modes.json`；*SensorEvent* API 参考，`_raw/sensorevent.json`）。抓取日 2026-10-05。
 
 ## 坐标系（官方原文实测规则）
 
