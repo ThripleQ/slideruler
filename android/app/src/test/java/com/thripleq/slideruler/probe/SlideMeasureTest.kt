@@ -61,6 +61,32 @@ class SlideMeasureTest {
     // 1 m 的 1e-6 = 0.0001 cm —— 比界面显示的 0.01 cm 还紧 100 倍
     private val tol = 1e-6
 
+    /**
+     * 测量头几何（杠杆臂）：Δp_H = Δp_I + [R(t1)−R(t0)]·r
+     *
+     * 期望值由 `sim/measure2.py` 在同一份夹具上以 head_r=(0,−0.09,0) 产出。
+     * 这条断言锁的是**两边对同一个几何修正的理解一致**，不是"加了杠杆臂就更准" ——
+     * r 必须标定，见 docs/v4-head-model.md §3。
+     */
+    @Test
+    fun `杠杆臂 - 测量头位移 = IMU 位移 + 两端姿态差乘 r`() {
+        val f = load("20261011_100444")
+        val r = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs, 0.0, -0.09, 0.0)
+        assertTrue(r.ok)
+        assertEquals("测量头位移", 0.1442623044500182, r.distanceM, tol)
+        assertEquals("IMU 位移（应与不带 headR 时一致）", 0.15415568278434755, r.imuDistM, tol)
+        assertEquals("杠杆臂项", 0.0099533568596610264, r.leverM, tol)
+        assertEquals("裸积分也要加杠杆臂项", 0.14910489926335033, r.bareM, 1e-6)
+        assertEquals("平台下界（端点在动，杠杆臂一起扫）", 0.14385566028897043, r.plateauLoM, tol)
+        assertEquals("平台上界", 0.14426288473734847, r.plateauHiM, tol)
+
+        // 关掉杠杆臂时必须逐位回到 v3 的答案 —— 这是"默认不改变行为"的守卫
+        val v3 = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs)
+        assertEquals("headR=0 时 distanceM 必须等于 imuDistM", v3.distanceM, v3.imuDistM, 0.0)
+        assertEquals("headR=0 时杠杆臂项必须为 0", 0.0, v3.leverM, 0.0)
+        assertEquals("headR=0 时必须复现 v3 的距离", 0.15415568278434755, v3.distanceM, tol)
+    }
+
     @Test
     fun `完全静止 - 判没动而不是凭空造距离`() {
         val f = load("20261011_100631")

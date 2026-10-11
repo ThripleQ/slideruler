@@ -80,8 +80,12 @@ fun Sample.toPt3(): Pt3 = Pt3(tNs, x.toDouble(), y.toDouble(), z.toDouble())
 class MeasureResult(
     val ok: Boolean,
     val failReason: String? = null,
-    /** 净位移（米）。 */
+    /** **测量头**的净位移（米）。headR 全 0 时等于 [imuDistM]。 */
     val distanceM: Double = 0.0,
+    /** IMU 芯片自身的净位移（米）。与 [distanceM] 的差就是杠杆臂项 [leverM] 的作用。 */
+    val imuDistM: Double = 0.0,
+    /** 杠杆臂修正量 |[R(t1)−R(t0)]·r|（米）。比读数还大 ⇒ 姿态变化主导了这次测量。 */
+    val leverM: Double = 0.0,
     /** 同一窗口**不去趋势**（裸积分）得到的位移（米）。与 [distanceM] 的差 = 修正量。 */
     val bareM: Double = 0.0,
     /** |裸积分 − 去趋势|（米）：残差模型的分歧有多大。 */
@@ -147,7 +151,16 @@ object SlideMeasure {
      * 一次测量。[downNs] / [upNs] 是按下与松手时刻的 `elapsedRealtimeNanos`，
      * 与 `Sample.tNs` 同基准，可直接二分对齐。
      */
-    fun measure(acc: List<Pt3>, gyr: List<Pt3>, downNs: Long, upNs: Long): MeasureResult {
+    fun measure(
+        acc: List<Pt3>, gyr: List<Pt3>, downNs: Long, upNs: Long,
+        /**
+         * IMU → 测量头的机体系偏移（米）。默认全 0 = 把 IMU 自己当测量头（v3 行为）。
+         * 非 0 时输出的是**测量头**的净位移：Δp_H = Δp_I + [R(t1) − R(t0)]·r
+         * —— 刚体关系在位置层面就是精确的，不需要对角速度求差分。
+         * ⚠ 这个向量必须标定（见 docs/v4-head-model.md §3），猜出来的值会让修正反向。
+         */
+        headRx: Double = 0.0, headRy: Double = 0.0, headRz: Double = 0.0,
+    ): MeasureResult {
         val n = min(acc.size, gyr.size)
         if (n < MIN_SAMPLES) return MeasureResult(false, "样本太少（$n 条）")
 
@@ -376,15 +389,29 @@ object SlideMeasure {
         // ---- 8. 双锚点 ZUPT ----
         val zupt = zuptTwoAnchor(lx, ly, lz, w0, w1, run0, run1, dt)
 
+        // ---- 8a. 测量头几何（刚体杠杆臂）----
+        // 加速度计装在机身某处，用户想测的是机身另一个点，两者**不是同一个点**：
+        // 手机一转，即使测量头钉着不动，IMU 也会沿弧线走一段。
+        //     Δp_H = Δp_I + [R(t1) − R(t0)]·r
+        // 在**位置层面**做修正，就不需要角加速度 —— 若改在加速度层面补偿
+        // （a_H = a_I + R(α×r + ω×(ω×r))），得先对带噪的陀螺求差分，噪声会被放大。
+        // 量级：r=9 cm、转 30° 时 |ΔR·r| = 2r·sin(15°) ≈ 4.7 cm。仿真里 v3 就报了这个数（真值 0）。
+        val dLever = qs[w1].rotate(V3(headRx, headRy, headRz)) -
+            qs[w0].rotate(V3(headRx, headRy, headRz))
+        val pHead = V3(zupt.endX, zupt.endY, zupt.endZ) + dLever
+        val distHead = pHead.norm()
+
         // ---- 8b. 残差模型分歧 ----
         // 「裸积分」与「去趋势」是残差加速度的两种极端模型：前者当它是 0，后者当它是 A·t+B。
         // 两者相差超过答案本身 ⇒ 答案是两个大数之差，由**模型假设**决定而不是由数据决定，
         // 这时窄平台毫无意义（平台只反映端点抖动，反映不了模型分歧）。
         // 真机实测的分界很干净：有三条有真值（15 cm）的是 3% / 16% / 46%，都没超；
         // 四条没有真值的是 150% / 260% / 590% / 4587%，全超。见 sim/compare_v1_v2.py。
-        val bare = integrateEnd(lx, ly, lz, w0, w1, dt)
-        val modelGap = abs(bare - zupt.distanceM)
-        val modelSensitive = modelGap > max(zupt.distanceM, MODEL_GAP_FLOOR_M)
+        // 裸积分也要加同一个杠杆臂项，否则两个模型在不同对象上比，gap 没有意义。
+        val bv = integrateEndVec(lx, ly, lz, w0, w1, dt)
+        val bare = (V3(bv[0], bv[1], bv[2]) + dLever).norm()
+        val modelGap = abs(bare - distHead)
+        val modelSensitive = modelGap > max(distHead, MODEL_GAP_FLOOR_M)
 
         // ---- 9. 平台宽度：窗口端点在各自静止段内挪动，答案变化多少 ----
         var plo = Double.MAX_VALUE
@@ -396,17 +423,24 @@ object SlideMeasure {
                 val g = j.toDouble() / (PLATEAU_GRID - 1)
                 val b1 = Math.round(m1 + g * (run1[1] - 1 - m1)).toInt()
                 if (b1 - a0 < 5) continue
-                val d = zuptTwoAnchor(lx, ly, lz, a0, b1,
-                    runContaining(flags, a0, n), runContaining(flags, b1, n), dt).distanceM
+                val z = zuptTwoAnchor(lx, ly, lz, a0, b1,
+                    runContaining(flags, a0, n), runContaining(flags, b1, n), dt)
+                // 端点在动 ⇒ 杠杆臂项跟着端点姿态走，必须一起扫，
+                // 否则平台只反映 IMU 那部分，掩盖了姿态误差经由杠杆臂的放大。
+                val dl = qs[b1].rotate(V3(headRx, headRy, headRz)) -
+                    qs[a0].rotate(V3(headRx, headRy, headRz))
+                val d = (V3(z.endX, z.endY, z.endZ) + dl).norm()
                 if (d < plo) plo = d
                 if (d > phi) phi = d
             }
         }
-        if (plo > phi) { plo = zupt.distanceM; phi = zupt.distanceM }
+        if (plo > phi) { plo = distHead; phi = distHead }
 
         return MeasureResult(
             ok = true,
-            distanceM = zupt.distanceM,
+            distanceM = distHead,
+            imuDistM = zupt.distanceM,
+            leverM = dLever.norm(),
             bareM = bare,
             modelGapM = modelGap,
             modelSensitive = modelSensitive,
@@ -528,9 +562,37 @@ private fun solveAttitude(
 
 // ------------------------------------------------------------------ 积分与 ZUPT
 
-private class Zupt(val distanceM: Double, val anchorDrift: Double)
+/** 末端位置随 Zupt 一起返回：杠杆臂修正是加在**位移矢量**上的，只有标量不够用。 */
+private class Zupt(
+    val distanceM: Double,
+    val anchorDrift: Double,
+    val endX: Double, val endY: Double, val endZ: Double,
+)
 
 /** 裸积分（不去趋势）：梯形二次积分，返回净位移模长。作为残差模型分歧的另一端。 */
+/** 裸积分的末端**位移矢量**（不出模长）—— 杠杆臂修正必须加在矢量上，标量没法加。 */
+private fun integrateEndVec(lx: DoubleArray, ly: DoubleArray, lz: DoubleArray,
+                            w0: Int, w1: Int, dt: Double): DoubleArray {
+    val m = w1 - w0
+    var px = 0.0
+    var py = 0.0
+    var pz = 0.0
+    var vx = 0.0
+    var vy = 0.0
+    var vz = 0.0
+    for (k in 1..m) {
+        val i = w0 + k
+        val nx = vx + 0.5 * (lx[i - 1] + lx[i]) * dt
+        val ny = vy + 0.5 * (ly[i - 1] + ly[i]) * dt
+        val nz = vz + 0.5 * (lz[i - 1] + lz[i]) * dt
+        px += 0.5 * (vx + nx) * dt
+        py += 0.5 * (vy + ny) * dt
+        pz += 0.5 * (vz + nz) * dt
+        vx = nx; vy = ny; vz = nz
+    }
+    return doubleArrayOf(px, py, pz)
+}
+
 private fun integrateEnd(lx: DoubleArray, ly: DoubleArray, lz: DoubleArray,
                          w0: Int, w1: Int, dt: Double): Double {
     val m = w1 - w0
@@ -620,7 +682,7 @@ private fun zuptTwoAnchor(
     // （早先这里算的是修正**后**的均值，那是构造上恒等于 0 的死字段。）
     // 它和 |b|·T 同量级时才说明残差是常量；远大于 |b|·T 说明静止段里其实还在动。
     val drift = max(norm3(v0x, v0y, v0z), norm3(v1x, v1y, v1z))
-    return Zupt(dist, drift)
+    return Zupt(dist, drift, px[m], py[m], pz[m])
 }
 
 private fun meanRange(v: DoubleArray, from: Int, to: Int): Double {

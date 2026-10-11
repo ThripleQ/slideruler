@@ -26,7 +26,7 @@ import os
 import statistics
 
 from pipeline import (G, q_delta, q_from_two_vectors, qnorm, qrot, qrotT, qmul,
-                       vcross, vnorm, vscale, vsub, vunit)
+                       vadd, vcross, vnorm, vscale, vsub, vunit)
 
 # ------------------------------------------------------------------ 参数
 
@@ -100,14 +100,21 @@ def percentile(xs, q):
     return s[min(len(s) - 1, max(0, int(q * len(s))))]
 
 
-def static_flags(acc, gyr, gb, dt):
-    """静止标记 + 用到的阈值（全部来源可追溯）。"""
+def static_flags(acc, gyr, gb, dt, floor_a=None, floor_g=None):
+    """静止标记 + 用到的阈值（全部来源可追溯）。
+
+    floor_a / floor_g 给了就不用 5% 分位数自举。自举有个致命前提：
+    数据里得真有 ≥5% 的样本是静止的。手机全程手抖时这个前提不成立 ——
+    那 5% 是抖得最轻的时刻，阈值被抬到抖动幅度之上 4 倍，
+    连真正的滑动都判成静止（仿真 slide_wobble：15 cm 被报成 0.20 cm）。
+    器件噪声地板是可以离线标定一次的常数，比每次自举可靠。
+    """
     sd = rolling_max_std(acc, dt)
-    floor = percentile(sd, 0.05)
+    floor = percentile(sd, 0.05) if floor_a is None else floor_a
     thr_a = max(STATIC_FACTOR * floor, STATIC_FLOOR)
     om = [vsub(gyr[i], gb) for i in range(len(gyr))]
     on = rolling_max_norm(om, dt)
-    ofloor = percentile(on, 0.05)
+    ofloor = percentile(on, 0.05) if floor_g is None else floor_g
     thr_g = max(STATIC_FACTOR * ofloor, GYRO_FLOOR)
     flags = [sd[i] <= thr_a and on[i] <= thr_g for i in range(len(acc))]
     return flags, floor, thr_a, ofloor, thr_g
@@ -133,19 +140,30 @@ def runs_of(flags, want, min_len):
 
 # ------------------------------------------------------------------ 姿态
 
-def solve_attitude_v2(acc, gyr, gb, g_ref_body, flags, dt, alpha=ALPHA, gate=GATE_RAD):
+def solve_attitude_v2(acc, gyr, gb, g_ref_body, flags, dt, alpha=ALPHA, gate=GATE_RAD,
+                      use_flags=None):
     """互补滤波。**加速度修正在静止段才开**，运动中纯陀螺外推。
+
+    use_flags：姿态修正的门控（默认 = flags）。两者可以不同 —— 这正是 v4 的关键改动：
+      flags     问的是「这段能不能当 ZUPT 锚点」（要保守，宁缺毋滥）
+      use_flags 问的是「此刻的 acc 方向能不能当重力方向用」（要严格：只要手机在动，
+                 acc = 重力 + 运动加速度 + 杠杆臂的切向/向心项，它的方向**不是**重力方向）
+    手抖 3° 经过 9 cm 杠杆臂就有 0.22 m/s² 的额外加速度，相当于把重力方向拧了 1.3°，
+    再拿它去"修正"姿态，等于把误差写进姿态里 —— 重力泄漏 0.22 m/s²，
+    在 2 s 窗口上积分两步就是 10 cm 量级。抖动期间**必须**纯陀螺外推。
+    运动段由按钮窗界定（外部事实，不受数据自举污染）。
 
     v1 的参考是 `g_ref_body`（校准时刻的体重力方向，体坐标里固定不动）——
     等于让滤波器主动抵抗手机的真实旋转：持续角速率 ω 下稳态姿态误差 ≈ ω·dt/α
     （α=0.05、dt=9.5 ms 时 ≈ 0.19·ω），ω=5°/s 就有 1° 误差、重力泄漏 0.17 m/s²。
     v2 换成当前**实测**加速度方向（标准 Mahony），手机转它就跟着转，没有这个稳态误差。
     """
+    ok = flags if use_flags is None else use_flags
     q = q_from_two_vectors(g_ref_body, (0.0, 0.0, 1.0))
     qs = [q]
     for i in range(len(acc) - 1):
         q_pred = qnorm(qmul(q, q_delta(vsub(gyr[i], gb), dt)))
-        if flags[i]:
+        if ok[i]:
             e = vcross(qrotT(q_pred, (0.0, 0.0, 1.0)), vunit(acc[i]))
             q = (q_pred if vnorm(e) > gate
                  else qnorm(qmul(q_pred, q_delta(vscale(e, -alpha), dt))))
@@ -245,14 +263,49 @@ def zupt_two_anchor(a_lin, w0, w1, run0, run1, dt, quad=False):
         [vnorm(vc[i - w0]) for i in range(*run1)]))
 
 
+def principal_dir(pts, iters=60):
+    """点云的第一主成分方向（幂法）。3×3 的协方差矩阵不需要通用特征分解。
+
+    用它而不是"端点连线"，是因为端点只有两个样本，噪声直接进方向；
+    主方向用的是整条轨迹，端点噪声被 √N 摊薄。
+    """
+    c = len(pts)
+    if c < 2:
+        return (1.0, 0.0, 0.0)
+    mu = tuple(sum(p[i] for p in pts) / c for i in range(3))
+    C = [[0.0] * 3 for _ in range(3)]
+    for p in pts:
+        d = (p[0] - mu[0], p[1] - mu[1], p[2] - mu[2])
+        for i in range(3):
+            for j in range(3):
+                C[i][j] += d[i] * d[j]
+    v = (1.0, 1.0, 1.0)
+    for _ in range(iters):
+        w = tuple(sum(C[i][j] * v[j] for j in range(3)) for i in range(3))
+        nv = vnorm(w)
+        if nv < 1e-18:
+            return vunit(v)
+        v = tuple(x / nv for x in w)
+    return vunit(v)
+
+
 # ------------------------------------------------------------------ 主流程
 
 def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=QUAD,
-            merge_mode=MERGE_MODE):
+            merge_mode=MERGE_MODE, head_r=None,
+            floor_a=None, floor_g=None, g_mag_fix=None, gate_motion=True):
     """merge_mode 决定「哪一段运动算这次测量」：
       "overlap" 取与按钮窗重叠最多的那一组（v2 原行为，见下面注释里的缺陷）
       "press"   取按钮按住期间发生过的所有运动的**并集**（v3，默认）
                 —— 不再靠静止检测去切运动段，所以匀速段不会被当成"停了"把滑动切碎。
+      "button"  **直接以按钮窗口为运动区间**（v4）。press 仍要靠静止检测认出"哪里在动"，
+                而静止检测的噪声地板是从本次数据自举出来的（5% 分位数）——
+                手机全程手抖时，那 5% 就是抖得最轻的时刻，阈值被抬到抖动幅度之上，
+                连真正的滑动都判成"静止"。仿真 slide_wobble 里运动段只剩 0.07 s、
+                15 cm 报成 0.20 cm，就是这么来的。按钮时刻是用户给的外部事实，
+                不受数据自举污染，所以边界应该由它定，静止检测退回只管找锚点。
+
+    floor_a / floor_g：器件噪声地板（m/s²、rad/s）。给了就用它、不再自举。
     """
     n = min(len(acc), len(gyr))
     if dt is None:
@@ -267,7 +320,7 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
     qa = max(0, i_quiet - pre // 2)
     qb = min(n, i_quiet + pre // 2 + 1)
     gb = tuple(statistics.fmean(gyr[i][a] for i in range(qa, qb)) for a in range(3))
-    flags, floor, thr_a, ofloor, thr_g = static_flags(acc, gyr, gb, dt)
+    flags, floor, thr_a, ofloor, thr_g = static_flags(acc, gyr, gb, dt, floor_a, floor_g)
     res.update(floor=floor, thr_a=thr_a, ofloor=ofloor, thr_g=thr_g, quiet=(qa, qb))
 
     min_run = max(3, int(STATIC_MIN_S / dt))
@@ -297,6 +350,8 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
                     "reason": f"移动太慢，检测器分辨不出（{SLOW_WIN_S}s 尺度上只有 "
                               f"{slow_peak:.4f} / 阈值 {slow_thr:.4f} m/s²）—— 请快速滑完（1~2 秒）"}
         return {**res, "ok": True, "distanceM": 0.0, "noMotion": True,
+                "imuDistM": 0.0, "axisDistM": 0.0, "leverM": 0.0,
+                "straightness": 0.0, "straightRms": 0.0,
                 "reason": "窗口内没有任何运动", "plateau": (0.0, 0.0),
                 "slowPeak": slow_peak, "slowThr": slow_thr,
                 "staticRuns": static_runs, "endHitBound": False}
@@ -331,6 +386,12 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
         m0 = min(g[0] for g in sel)
         m1 = max(g[1] for g in sel)
         groups.sort(key=lambda g: g[0])
+    elif merge_mode == "button":
+        # 运动区间 = 用户按住的那一段，一个样本都不靠静止检测。
+        # 代价：按住期间如果停顿很久，窗口会长，零偏误差按 ∝T² 涨。
+        # 收益：手抖再大也不会把滑动判成静止（见上面的 slide_wobble）。
+        sel = [(down_i, up_i)]
+        m0, m1 = down_i, up_i
     else:
         # 「取重叠最大的一组」在**所有组都不与按钮窗重叠**时会退化成「取时间最早的一组」——
         # 那一段往往只是用户按下之前挪了一下手机，不是这次要测的滑动。
@@ -344,7 +405,8 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
         m0, m1 = groups[0]
     res.update(motion=(m0, m1), groups=[tuple(g) for g in groups],
                nMerged=len(sel) if merge_mode == "press" else 1,
-               motionOverlap=overlap(sel[0] if merge_mode == "press" else groups[0]) * dt)
+               motionOverlap=overlap((sel[0] if merge_mode in ("press", "button")
+                                      else groups[0])) * dt)
 
     # ---- 3. 窗口 = 运动段 ± 余量，两端必须落在静止段里 ----
     m = max(1, int(MARGIN_S / dt))
@@ -391,6 +453,8 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
     run1 = run_containing(w1)
     if run0[0] == run1[0]:
         return {**res, "ok": True, "distanceM": 0.0, "noMotion": True,
+                "imuDistM": 0.0, "axisDistM": 0.0, "leverM": 0.0,
+                "straightness": 0.0, "straightRms": 0.0,
                 "reason": "窗口两端落在同一段静止里"}
     # STATIC_MIN_S 约束的是**整段静止**，不是裁进窗口之后剩下的那点余量。
     # 后者恒等于 MARGIN_S（实测 0.143 s / 15 个样本，见 exp_anchor.py）——
@@ -426,9 +490,18 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
     gb2 = tuple(statistics.fmean(gyr[i][a] for i in range(ca, cb)) for a in range(3))
     am = tuple(statistics.fmean(acc[i][a] for i in range(ca, cb)) for a in range(3))
     g_mag = vnorm(am)
+    # |g| 是个**常量**（当地重力 × 器件比例因子），不该每次从一小段数据里自举：
+    # 校准段只有 1~2 s，而手抖是 1~2 Hz 的低频 —— 抖动在这个窗口上根本平均不掉。
+    # 实测（仿真 slide_wobble，真值 9.81）：自举值在 9.753~9.794 之间乱跳，
+    # 差 0.057 m/s² 的重力残差在 2 s 窗口上积分两步就是 ~11 cm 的假位移。
+    # 给了 g_mag_fix（离线标定值）就用它，自举值只留作交叉校验（见 gMagDelta）。
+    g_mag_data = g_mag
+    if g_mag_fix is not None:
+        g_mag = float(g_mag_fix)
     g_ref = vunit(am)
     sigma = max(statistics.pstdev([acc[i][a] for i in range(ca, cb)]) for a in range(3))
-    res.update(gMag=g_mag, sigma=sigma, calStaticFrac=sum(
+    res.update(gMag=g_mag, gMagData=g_mag_data, gMagDelta=g_mag_data - g_mag,
+               sigma=sigma, calStaticFrac=sum(
         1 for i in range(ca, cb) if flags[i]) / (cb - ca))
     if not (0.5 * G < g_mag < 1.5 * G):
         return {**res, "reason": f"校准段重力读数异常 |g|={g_mag:.3f}"}
@@ -436,20 +509,62 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
         return {**res, "reason": f"校准段不够静止（静止占比 {res['calStaticFrac']*100:.0f}%）"}
 
     # ---- 5. 姿态（修正参考系）----
-    qs = solve_attitude_v2(acc, gyr, gb2, g_ref, flags, dt)
+    # 按钮窗内一律不做加速度修正：那段时间手机在动，acc 方向不是重力方向。
+    # 这条只影响姿态，不影响锚点搜索 —— 锚点仍然用原始终止判据找。
+    gate_flags = ([flags[i] and not (down_i <= i <= up_i) for i in range(n)]
+                  if gate_motion else flags)
+    qs = solve_attitude_v2(acc, gyr, gb2, g_ref, flags, dt, use_flags=gate_flags)
     a_lin = to_linear(acc, qs, g_mag)
 
     # ---- 6. 双锚点 ZUPT ----
     dist, vc, p, anchor_drift, run_spread = zupt_two_anchor(a_lin, w0, w1, run0, run1, dt, quad)
     bare = vnorm(integrate_from(a_lin, w0, w1, dt)[1][-1])
 
+    # ---- 6b. 测量头几何（刚体杠杆臂）----
+    # 加速度计装在机身某处，用户想测的是机身另一个点。两者**不是同一个点**：
+    # 手机一转，即使测量头钉着不动，IMU 也会沿弧线走一段。
+    #
+    # 刚体关系在**位置层面**是精确等式，不需要角加速度：
+    #     p_H(t) = p_I(t) + R(t)·r      ⇒   Δp_H = Δp_I + [R(t1) − R(t0)]·r
+    # 这一点很关键：若在加速度层面补偿（a_H = a_I + R(α×r + ω×(ω×r))），
+    # 就得对带噪的陀螺读数做数值微分求 α —— 噪声被放大，得不偿失。
+    # 位置层面只用到两端姿态，白噪声只影响它们各自的估计误差，不放大。
+    #
+    # 量级（r=9 cm）：转 30° 时 |ΔR·r| = 2·r·sin(15°) ≈ 4.7 cm。
+    # 仿真实测：测量头不动、手机绕它转 30°，v3 报 4.66 cm（真值 0），修正后应回到 0。
+    r = tuple(float(x) for x in (head_r or (0.0, 0.0, 0.0)))
+    d_lever = vsub(qrot(qs[w1], r), qrot(qs[w0], r))   # [R(t1)−R(t0)]·r，导航系
+    p_head = vadd(p[-1], d_lever)
+    dist_head = vnorm(p_head)
+
+    # ---- 6c. 沿轨迹主方向的净位移 ----
+    # 用户问的是"沿桌边滑了多远"（一个标量），不是"IMU 在三维里飘了多远的模长"。
+    # 两者在误差面前不是一回事：模长会把垂直于测量方向的漂移也算进去
+    # （z 方向漂 2 cm，15 cm 就报成 15.13 cm），而沿主方向的投影不会。
+    # 前提：测量头确实沿一条直线走 —— 用 straightness 把这个前提暴露出来，
+    # 轨迹明显不是直线时（比如画弧、抬起来了）投影会低估，诊断会喊。
+    p_traj = [vadd(p[k], vsub(qrot(qs[min(w0 + k, n - 1)], r), qrot(qs[w0], r)))
+              for k in range(len(p))]
+    e = principal_dir(p_traj)
+    dist_axis = abs(sum(e[i] * p_head[i] for i in range(3)))
+    mu = tuple(sum(q[i] for q in p_traj) / len(p_traj) for i in range(3))
+    off = []
+    for q_ in p_traj:
+        d = vsub(q_, mu)
+        t = sum(d[i] * e[i] for i in range(3))
+        off.append(vnorm(vsub(d, vscale(e, t))))
+    straightness = (max(off) / dist_axis) if dist_axis > 1e-9 else 0.0
+    straight_rms = (math.sqrt(sum(x * x for x in off) / len(off)) / dist_axis
+                    if dist_axis > 1e-9 else 0.0)
+
     # 「裸积分」与「去趋势」是残差加速度的两种极端模型：前者当它是 0，后者当它是 A·t+B。
     # 两者相差超过答案本身 ⇒ 答案是两个大数之差，由**模型假设**决定而不是由数据决定，
     # 这时窄平台毫无意义（平台只反映端点抖动，反映不了模型分歧）。
     # 真机实测的分界很干净：有三条有真值（15 cm）的是 3% / 16% / 46%，都没超；
     # 四条没有真值的是 150% / 260% / 590% / 4587%，全超。见 compare_v1_v2.py。
-    model_gap = abs(bare - dist)
-    model_sensitive = model_gap > max(dist, MODEL_GAP_FLOOR_M)
+    bare_head = vnorm(vadd(integrate_from(a_lin, w0, w1, dt)[1][-1], d_lever))
+    model_gap = abs(bare_head - dist_head)
+    model_sensitive = model_gap > max(dist_head, MODEL_GAP_FLOOR_M)
 
     # ---- 7. 平台宽度：窗口端点在静止段内挪动，答案变化多少 ----
     grid0, grid1 = [], []
@@ -462,12 +577,18 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
         for b1 in grid1:
             if b1 - a0 < 5:
                 continue
-            ds.append(zupt_two_anchor(a_lin, a0, b1, run_containing(a0),
-                                      run_containing(b1), dt, quad)[0])
+            # 平台扫描的端点在动，杠杆臂项跟着端点姿态走 —— 它必须一起扫，
+            # 否则平台只反映 IMU 那部分，掩盖了姿态误差经由杠杆臂的放大。
+            p_imu = zupt_two_anchor(a_lin, a0, b1, run_containing(a0),
+                                    run_containing(b1), dt, quad)[2][-1]
+            dl = vsub(qrot(qs[b1], r), qrot(qs[a0], r))
+            ds.append(vnorm(vadd(p_imu, dl)))
     ds.sort()
     plateau = (ds[0] * 100, ds[-1] * 100) if ds else (0.0, 0.0)
 
-    out = {**res, "ok": True, "distanceM": dist, "bareM": bare, "plateau": plateau,
+    out = {**res, "ok": True, "distanceM": dist_head, "imuDistM": dist,
+           "leverM": vnorm(d_lever), "bareM": bare_head, "bareImuM": bare,
+           "plateau": plateau,
            "anchorDrift": anchor_drift, "runSpread": run_spread,
            "modelGapM": model_gap, "modelSensitive": model_sensitive,
            "T": (w1 - w0) * dt, "holdS": (up_i - down_i) * dt,
@@ -479,7 +600,14 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
            # run0/run1 内部是半开区间 [a,b)；Kotlin 侧报闭区间（与 window/motion 一致），
            # 这里显式给出闭区间形式，好让两边的下标能逐字对照。
            "anchorInclusive": ((run0[0], run0[1] - 1), (run1[0], run1[1] - 1)),
-           "endHitBound": end_hit_bound}
+           "endHitBound": end_hit_bound,
+           # 辨识杠杆臂用：IMU 位移矢量 + 窗口两端姿态。
+           # 有了这两个，Δp_H = Δp_I + [R(t1)−R(t0)]·r 可以事后对任意 r 重算，
+           # 不必每换一个 r 就把整条链路再跑一遍。
+           "pImuVec": tuple(p[-1]), "q0": qs[w0], "q1": qs[w1],
+           "dRr": tuple(d_lever),
+           "axisDistM": dist_axis, "axis": e,
+           "straightness": straightness, "straightRms": straight_rms}
     warns = []
     if end_hit_bound:
         warns.append("松手后手机在 %0.1f s 内没有停稳（运动一直延续到数据末尾）" % tail_s)
