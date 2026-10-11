@@ -50,9 +50,10 @@ private const val SLOW_WIN_S = 0.80        // 慢动作检测窗（白噪声 σ 
 private const val STATIC_FACTOR = 4.0      // 静止阈值 = 本机噪声地板 × 该系数
 private const val STATIC_FLOOR = 0.010     // 噪声地板硬下限（m/s²）
 private const val GYRO_FLOOR = 0.010       // 陀螺静止阈值硬下限（rad/s）
-private const val STATIC_MIN_S = 0.20      // 一段静止至少这么久才算数
+private const val STATIC_MIN_S = 0.20      // 一段静止至少这么久才敢当锚点（约束整段，见 measure()）
 private const val CAL_MIN_S = 0.25         // 校准段最短
 private const val CAL_MAX_S = 2.0          // 校准段最长
+private const val CAL_STATIC_FRAC = 0.95   // 校准段里静止样本的最低占比（低于此拒绝测量）
 private const val MARGIN_S = 0.15          // 运动段两侧各留的静止余量
 private const val TAIL_S = 2.5             // UP 之后最多再看这么久
 private const val PRE_S = 2.0              // DOWN 之前最多往回看这么久
@@ -233,6 +234,16 @@ object SlideMeasure {
             val ov = max(0, min(g[1], up) - max(g[0], dn))
             if (ov > bestOv) { bestOv = ov; best = g }
         }
+        // 「取重叠最大的一组」在**所有组都不与按钮窗重叠**时会退化成「取时间最早的一组」——
+        // 那一段往往只是用户按下之前挪了一下手机，不是这次要测的滑动。
+        // `up <= dn` 那个守卫挡不住这里：它只保证按钮窗长度为正，保证不了选中的运动
+        // 就是这次滑动。按钮窗完全可以又正、又与所有运动组零重叠。
+        // 实测：把 100444 的按钮窗放到两段运动之间的空隙，旧代码会去量「按下前挪手机」那一段。
+        if (bestOv <= 0) {
+            return MeasureResult(false,
+                "按下期间没有检测到运动（${groups.size} 段运动都在按下之前或松手之后）",
+                dt = dt, holdS = (up - dn) * dt)
+        }
         val m0 = best[0]
         val m1 = best[1]
 
@@ -274,6 +285,28 @@ object SlideMeasure {
             return MeasureResult(true, distanceM = 0.0, noMotion = true, dt = dt,
                 holdS = (up - dn) * dt)
         }
+        // STATIC_MIN_S 约束的是**整段静止**，不是裁进窗口之后剩下的那点余量。
+        // 后者恒等于 MARGIN_S（实测 0.143 s / 15 个样本，见 sim/exp_anchor.py）——
+        // 拿它去卡 0.20 s 会把全部测量干掉，那是约束错了对象。
+        //
+        // 想让有效锚点变长只有一个办法：把窗口往静止段里外扩。试过了，不行 ——
+        // 三条有真值的里两条变差（100459 +5.02%→+9.37%、100529 +3.72%→+6.04%），
+        // 偏差随窗口长度单调增长。静止段延长窗口**不是**白送样本（零偏会漂，
+        // 线性模型拟合不住），∝T² 那一派赢了。所以锚点就这么长，认了。
+        //
+        // 那 STATIC_MIN_S 剩下的用处是挡「假静止」：0.2 s 的滚动标准差根本判不出
+        // 只有 0.038 s 的静止，而 100555 右侧静止段只有 4 个样本，它给出的
+        // 1.01 cm（平台 0.90~1.51）纯属噪声。整段静止够长，才说明这里真静过。
+        if (min(run0[1] - run0[0], run1[1] - run1[0]) < minRun) {
+            val s0 = (run0[1] - run0[0]) * dt
+            val s1 = (run1[1] - run1[0]) * dt
+            val which = if (s0 <= s1) "按下之前" else "松手之后"
+            return MeasureResult(false,
+                "${which}的静止段只有 ${"%.2f".format(min(s0, s1))} s" +
+                    "（要 ≥${"%.2f".format(STATIC_MIN_S)} s 才敢当锚点）—— 停稳后再松手",
+                dt = dt, holdS = (up - dn) * dt, motionS = (m1 - m0) * dt,
+                windowStart = w0, windowEnd = w1)
+        }
 
         // ---- 5. 校准段 = 运动之前那段静止（用户「按住后停顿」的那一段）----
         val calLo = max(run0[0], m0 - (CAL_MAX_S / dt).toInt())
@@ -301,6 +334,18 @@ object SlideMeasure {
         )
         if (gMag < 0.5 * 9.80665 || gMag > 1.5 * 9.80665) {
             return MeasureResult(false, "校准段重力读数异常 |g|=${"%.3f".format(gMag)}", dt = dt)
+        }
+        // 校准段必须**几乎全静**。混着运动样本的均值既不是静止零偏也不是运动加速度，
+        // 拿它当重力方向会让整条链路的重力泄漏掉一大块。
+        // 实测 100339：|g| 读到 9.43（本机实测应 9.91）、σ=2.01，v1 据此报了 168.62 cm。
+        // 这一条 Python 有、Kotlin 原本没有 —— 是移植时漏掉的，夹具没覆盖所以单测没发现。
+        var staticCnt = 0
+        for (i in calLo until calHi) if (flags[i]) staticCnt++
+        val calStaticFrac = staticCnt.toDouble() / (calHi - calLo)
+        if (calStaticFrac < CAL_STATIC_FRAC) {
+            return MeasureResult(false,
+                "校准段不够静止（静止占比 ${"%.0f".format(calStaticFrac * 100)}%）",
+                dt = dt, calS = (calHi - calLo) * dt, gravityMag = gMag)
         }
 
         // ---- 6. 姿态（加速度修正只在静止段开，运动中纯陀螺外推）----

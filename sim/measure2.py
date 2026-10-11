@@ -34,10 +34,13 @@ STATIC_WIN_S = 0.20      # 静止检测的滑动窗长（边界要锐）
 SLOW_WIN_S = 0.80        # 慢动作检测的滑动窗长（白噪声的 σ 不随窗长变，慢信号却会涨）
 STATIC_FACTOR = 4.0      # 静止阈值 = 本机噪声地板 × 该系数
 STATIC_FLOOR = 0.010     # 噪声地板的硬下限（m/s²），防止极端记录把阈值压到噪声里
-STATIC_MIN_S = 0.20      # 一段静止至少持续这么久才算数
+STATIC_MIN_S = 0.20      # 一段静止至少这么久才敢当锚点（约束的是整段静止，不是裁进窗口的余量）
 GYRO_FLOOR = 0.010       # 陀螺静止阈值的硬下限（rad/s）
 CAL_MIN_S = 0.25         # 校准段最短时长（0.25 s 足够：陀螺零偏估计误差 σ/√N ≈ 1.4e-4 rad/s）
 CAL_MAX_S = 2.0          # 校准段最长（只用运动前这一段的末尾，别拿太旧的数据）
+CAL_STATIC_FRAC = 0.95   # 校准段里静止样本的最低占比（混着运动样本的均值既不是
+#                          零偏也不是运动加速度，拿它当重力方向会漏一大块。实测 100339：
+#                          |g|=9.43 应为 9.91、σ=2.01，v1 据此报了 168.62 cm）
 MARGIN_S = 0.15          # 运动段两侧各留的静止余量（落在静止段内，所以无害）
 TAIL_S = 2.5             # UP 之后最多再看这么久，用来找运动结束后的静止段
 PRE_S = 2.0              # DOWN 之前最多往回看这么久，用来找校准段
@@ -300,8 +303,17 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
     def overlap(g):
         return max(0, min(g[1], up_i) - max(g[0], down_i))
     groups.sort(key=overlap, reverse=True)
+    # 「取重叠最大的一组」在**所有组都不与按钮窗重叠**时会退化成「取时间最早的一组」——
+    # 那一段往往只是用户按下之前挪了一下手机，不是这次要测的滑动。
+    # 注意 `up_i <= down_i` 那个守卫挡不住这里：它只保证按钮窗长度为正，
+    # 保证不了选中的运动就是这次滑动。按钮窗完全可以又正又与所有运动组零重叠。
+    # 实测：把 100444 的 down_i 换成 up_i（DOWN==UP）它会报 0.06 cm 而不是 15.4 cm。
+    if overlap(groups[0]) <= 0:
+        return {**res, "reason": "按下期间没有检测到运动"
+                                f"（{len(groups)} 段运动都在按下之前或松手之后）"}
     m0, m1 = groups[0]
-    res.update(motion=(m0, m1), groups=[tuple(g) for g in groups])
+    res.update(motion=(m0, m1), groups=[tuple(g) for g in groups],
+               motionOverlap=overlap(groups[0]) * dt)
 
     # ---- 3. 窗口 = 运动段 ± 余量，两端必须落在静止段里 ----
     m = max(1, int(MARGIN_S / dt))
@@ -349,7 +361,29 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
     if run0[0] == run1[0]:
         return {**res, "ok": True, "distanceM": 0.0, "noMotion": True,
                 "reason": "窗口两端落在同一段静止里"}
-    res.update(run0=run0, run1=run1)
+    # STATIC_MIN_S 约束的是**整段静止**，不是裁进窗口之后剩下的那点余量。
+    # 后者恒等于 MARGIN_S（实测 0.143 s / 15 个样本，见 exp_anchor.py）——
+    # 拿它去卡 STATIC_MIN_S=0.20 会把全部测量干掉，那是约束错了对象。
+    #
+    # 想让有效锚点变长只有一个办法：把窗口往静止段里外扩。试过了，不行 ——
+    # 三条有真值的里两条变差（100459 +5.02%→+9.37%、100529 +3.72%→+6.04%，
+    # T 从 2.84 s 涨到 5.04 s），偏差随窗口长度单调增长。
+    # 结论：静止段延长窗口**不是**白送样本（零偏会漂，线性模型拟合不住），
+    # ∝T² 那一派赢了，√N 那一派输了。所以锚点就这么长，认了。
+    #
+    # 那 STATIC_MIN_S 还剩下什么用？挡「假静止」：0.2 s 的滚动标准差
+    # 根本判不出只有 0.038 s 的静止，而 100555 右侧静止段只有 4 个样本，
+    # 它给出的 1.01 cm（平台 0.90~1.51）纯属噪声。整段静止够长，
+    # 才说明这里真的静过，值得当锚点。
+    if min(run0[1] - run0[0], run1[1] - run1[0]) < min_run:
+        s0 = (run0[1] - run0[0]) * dt
+        s1 = (run1[1] - run1[0]) * dt
+        which = "按下之前" if s0 <= s1 else "松手之后"
+        shorter = min(s0, s1)
+        return {**res, "reason": f"{which}的静止段只有 {shorter:.2f} s"
+                                f"（要 ≥{STATIC_MIN_S:.2f} s 才敢当锚点）—— 停稳后再松手"}
+    res.update(run0=run0, run1=run1,
+               anchorRunS=((run0[1] - run0[0]) * dt, (run1[1] - run1[0]) * dt))
 
     # ---- 4. 校准段 = 运动之前那段静止（就是用户「按住后停顿」的那一段）----
     cal = (max(run0[0], m0 - int(CAL_MAX_S / dt)), m0)
@@ -367,7 +401,7 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
         1 for i in range(ca, cb) if flags[i]) / (cb - ca))
     if not (0.5 * G < g_mag < 1.5 * G):
         return {**res, "reason": f"校准段重力读数异常 |g|={g_mag:.3f}"}
-    if res["calStaticFrac"] < 0.95:
+    if res["calStaticFrac"] < CAL_STATIC_FRAC:
         return {**res, "reason": f"校准段不够静止（静止占比 {res['calStaticFrac']*100:.0f}%）"}
 
     # ---- 5. 姿态（修正参考系）----
