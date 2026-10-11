@@ -24,6 +24,8 @@ import org.junit.Test
  *   100601  按下前一直在动    → 拒答，且理由必须指向"按下之前"而不是"松手之后"
  *   合成      按钮窗与运动零重叠  → 拒答（旧版会去量按下前挪手机那一段）
  *   合成      校准段被运动污染    → 拒答（这一条 Python 有、Kotlin 原本没有）
+ *   122416  一次按住被切成 5 段  → 必须**合并**成 #256→#638（旧版只取 0.29 s，报 0.59 cm）
+ *   122303  窗内两段运动        → 合并成 #176→#503，平台仍窄（证明合并不是一律搞炸）
  *
  * 下标约定：`measure2.py` 内部把连续段存成半开区间 `[a,b)`，但它另外导出一个
  * `anchorInclusive` = `((a0,b0-1),(a1,b1-1))`。Kotlin 侧统一报**闭区间**（与
@@ -263,6 +265,50 @@ class SlideMeasureTest {
             "理由要说清是校准段不够静止：$why",
             why.contains("校准段不够静止") && why.contains("80"),
         )
+    }
+
+    /**
+     * 一次按住里的多段运动必须合并，不许把一次滑动切碎。
+     *
+     * 122416 是一次真实按住（2.81 s）。静止检测在窗内切出 5 段运动
+     * （0.20 / 0.29 / 0.14 / 0.26 / 1.19 s），旧逻辑"取与按钮窗重叠最多的一组"
+     * 挑中了 0.29 s 那一段 → 报 **0.59 cm**。为什么挑错：真正那次 1.19 s 的滑动
+     * 延续到松手之后，它在按钮窗内的重叠只有 0.24 s，输给了完全落在窗内的 0.29 s 抖动。
+     *
+     * 这里锁的是**区间选择**，不是距离精度：合并后必须覆盖 #256→#638。
+     * 至于这个数本身 —— 平台 122~328 cm，`modelSensitive` 必须为真。
+     * 报一个明摆着离谱的数，好过报一个 0.59 cm 这种"看着体面但错"的数。
+     */
+    @Test
+    fun `一次按住里的多段运动必须合并 - 不许切碎滑动`() {
+        val f = load("20261011_122416")
+        val r = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs)
+        assertTrue(r.ok)
+        assertEquals("合并后的运动区间起点", 256, r.motionIndex)
+        assertEquals("窗口起点", 241, r.windowStart)
+        assertEquals("窗口终点", 653, r.windowEnd)
+        assertEquals("这次按住被静止检测切成了 5 段，必须全部合并", 5, r.mergedRuns)
+        assertEquals("距离", 1.5724710059332478, r.distanceM, tol)
+        assertTrue("这个数必须由模型敏感旗标点名", r.modelSensitive)
+    }
+
+    /**
+     * 合并的温和情形：窗内有两段运动（0.20 s 的小抖动 + 2.41 s 的滑动），
+     * 合并后 11.54 cm，平台 11.36~11.79 cm（很窄）→ 不报模型敏感。
+     * 这条用来证明"合并"不是一律把结果搞炸：数据本身干净时它照样给出稳定的数。
+     */
+    @Test
+    fun `合并两段运动 - 干净数据下平台仍然要窄`() {
+        val f = load("20261011_122303")
+        val r = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs)
+        assertTrue(r.ok)
+        assertEquals("合并后起点要包含那段小抖动", 176, r.motionIndex)
+        assertEquals("窗内两段被合并", 2, r.mergedRuns)
+        assertEquals("距离", 0.11536077799076491, r.distanceM, tol)
+        // 注意：Python 的 plateau 导出的单位是 cm，Kotlin 的 plateauLoM/HiM 是 m
+        assertEquals("平台下界 11.36cm", 0.11355606642146324, r.plateauLoM, tol)
+        assertEquals("平台上界 11.79cm", 0.11790405606335026, r.plateauHiM, tol)
+        assertFalse("干净数据不该报模型敏感", r.modelSensitive)
     }
 
     @Test

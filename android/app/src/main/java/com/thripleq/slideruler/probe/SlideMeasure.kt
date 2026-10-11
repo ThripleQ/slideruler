@@ -108,6 +108,11 @@ class MeasureResult(
     /** 修正前速度在两侧静止段里的均值模长（米/秒）—— 也就是"要去掉多少速度"。 */
     val anchorDrift: Double = 0.0,
     val motionIndex: Int = 0,
+    /**
+     * 这次测量合并了几段被静止检测切开的运动。
+     * 1 = 一次连续滑动；>1 = 中间有过停顿或匀速段被误判成静止，已合并。
+     */
+    val mergedRuns: Int = 1,
     val windowStart: Int = 0,
     val windowEnd: Int = 0,
     val anchorStart: Int = 0,
@@ -220,7 +225,7 @@ object SlideMeasure {
                 holdS = (up - dn) * dt, slowPeak = peak, slowThr = slowThr)
         }
 
-        // 按间隙分组，取与按钮窗重叠最多的那一组
+        // 按间隙分组
         val groups = ArrayList<IntArray>()
         var cur = intArrayOf(mot[0], mot[0])
         for (k in 1 until mot.size) {
@@ -228,24 +233,34 @@ object SlideMeasure {
             if (i - cur[1] <= gap) cur[1] = i else { groups.add(cur); cur = intArrayOf(i, i) }
         }
         groups.add(cur)
-        var best = groups[0]
-        var bestOv = -1
+
+        // ---- 运动区间的选法：按钮按住期间发生过的运动，取并集 ----
+        // 不能靠静止检测去切运动段。**匀速运动在加速度计上和静止无法区分**
+        // （加速度计测比力；匀速时比力就是重力，和静止完全一样），
+        // 所以一次平稳滑动的中间段必然被判成"静止"，完整滑动被切成好几段。
+        // 真机证据 122416：一次按住里被切成 5 段（0.20/0.29/0.14/0.26/1.19 s），
+        // 只取其中一段 → 报 0.59 cm（看起来体面但错）。
+        //
+        // 旧的「取与按钮窗重叠最多的那一组」有两个毛病：
+        //   ① 所有组都不与按钮窗重叠时退化成「取时间最早的一组」—— 那是按下前挪手机，
+        //      不是这次滑动（`up <= dn` 那个守卫挡不住：它只保证按钮窗长度为正）。
+        //   ② **惩罚延续到松手之后的那段**：正常滑动常常滑过松手时刻，它在窗内的重叠
+        //      反而小于一段完全落在窗内的短促抖动。实测 122416：真正那次 1.19 s 的滑动
+        //      重叠只有 0.24 s，输给了 0.29 s 的抖动段（重叠 0.29 s）—— 选中的是错的。
+        var m0 = -1
+        var m1 = -1
+        var nSel = 0
         for (g in groups) {
-            val ov = max(0, min(g[1], up) - max(g[0], dn))
-            if (ov > bestOv) { bestOv = ov; best = g }
+            if (max(0, min(g[1], up) - max(g[0], dn)) <= 0) continue
+            nSel++
+            if (m0 < 0 || g[0] < m0) m0 = g[0]
+            if (g[1] > m1) m1 = g[1]
         }
-        // 「取重叠最大的一组」在**所有组都不与按钮窗重叠**时会退化成「取时间最早的一组」——
-        // 那一段往往只是用户按下之前挪了一下手机，不是这次要测的滑动。
-        // `up <= dn` 那个守卫挡不住这里：它只保证按钮窗长度为正，保证不了选中的运动
-        // 就是这次滑动。按钮窗完全可以又正、又与所有运动组零重叠。
-        // 实测：把 100444 的按钮窗放到两段运动之间的空隙，旧代码会去量「按下前挪手机」那一段。
-        if (bestOv <= 0) {
+        if (nSel == 0) {
             return MeasureResult(false,
                 "按下期间没有检测到运动（${groups.size} 段运动都在按下之前或松手之后）",
                 dt = dt, holdS = (up - dn) * dt)
         }
-        val m0 = best[0]
-        val m1 = best[1]
 
         // ---- 4. 窗口 = 运动段 ± 余量，两端必须落在静止段里 ----
         val marg = max(1, (MARGIN_S / dt).toInt())
@@ -404,6 +419,7 @@ object SlideMeasure {
             tailStaticS = (run1[1] - m1) * dt,
             anchorDrift = zupt.anchorDrift,
             motionIndex = m0,
+            mergedRuns = nSel,
             windowStart = w0,
             windowEnd = w1,
             anchorStart = run0[0],

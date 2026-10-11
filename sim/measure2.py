@@ -45,6 +45,10 @@ MARGIN_S = 0.15          # 运动段两侧各留的静止余量（落在静止�
 TAIL_S = 2.5             # UP 之后最多再看这么久，用来找运动结束后的静止段
 PRE_S = 2.0              # DOWN 之前最多往回看这么久，用来找校准段
 GAP_S = 0.15             # 两段运动之间隔这么久以内的静止，算同一段运动
+# 运动区间的选法。见 measure(merge_mode=...) 的注释。
+# "press" = 按钮按住期间发生过的运动取并集（v3 默认，不再靠静止检测切段）
+# "overlap" = 取与按钮窗重叠最多的那一段（v2 行为，会切碎滑动、且惩罚滑过松手时刻的段）
+MERGE_MODE = "press"
 ALPHA = 0.05             # 互补滤波系数
 GATE_RAD = 0.30          # 加速度修正的门限（预测/实测重力方向夹角）
 PLATEAU_GRID = 5         # 平台宽度扫描的点数
@@ -243,7 +247,13 @@ def zupt_two_anchor(a_lin, w0, w1, run0, run1, dt, quad=False):
 
 # ------------------------------------------------------------------ 主流程
 
-def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=QUAD):
+def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=QUAD,
+            merge_mode=MERGE_MODE):
+    """merge_mode 决定「哪一段运动算这次测量」：
+      "overlap" 取与按钮窗重叠最多的那一组（v2 原行为，见下面注释里的缺陷）
+      "press"   取按钮按住期间发生过的所有运动的**并集**（v3，默认）
+                —— 不再靠静止检测去切运动段，所以匀速段不会被当成"停了"把滑动切碎。
+    """
     n = min(len(acc), len(gyr))
     if dt is None:
         dt = 0.01
@@ -299,21 +309,42 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
         else:
             groups.append([i, i])
 
-    # 取与按钮窗重叠最多的那一组
     def overlap(g):
         return max(0, min(g[1], up_i) - max(g[0], down_i))
-    groups.sort(key=overlap, reverse=True)
-    # 「取重叠最大的一组」在**所有组都不与按钮窗重叠**时会退化成「取时间最早的一组」——
-    # 那一段往往只是用户按下之前挪了一下手机，不是这次要测的滑动。
-    # 注意 `up_i <= down_i` 那个守卫挡不住这里：它只保证按钮窗长度为正，
-    # 保证不了选中的运动就是这次滑动。按钮窗完全可以又正又与所有运动组零重叠。
-    # 实测：把 100444 的 down_i 换成 up_i（DOWN==UP）它会报 0.06 cm 而不是 15.4 cm。
-    if overlap(groups[0]) <= 0:
-        return {**res, "reason": "按下期间没有检测到运动"
-                                f"（{len(groups)} 段运动都在按下之前或松手之后）"}
-    m0, m1 = groups[0]
+
+    if merge_mode == "press":
+        # ---- v3：按钮按住期间发生过的运动，全部算同一次测量，取并集 ----
+        # 不能靠静止检测去切运动段。**匀速运动在加速度计上和静止无法区分**
+        # （伽利略相对性原理：加速度计测的是比力，匀速时比力就是重力），
+        # 所以一次平稳滑动的中间段必然被判成"静止"，一次完整滑动被切成好几段。
+        # 真机证据 122416：一次按住里被切成 5 段（0.20/0.29/0.14/0.26/1.19 s），
+        # 只取其中一段 → 报 0.59 cm。
+        #
+        # 而且"取重叠最多的一组"还会**惩罚延续到松手之后的那段** —— 正常滑动常常
+        # 滑过松手时刻，它在窗内的重叠反而小于一段完全落在窗内的短促抖动。
+        # 实测 122416：1.19 s 那段（真正的一次滑动，延伸到松手后）重叠只有 0.24 s，
+        # 输给了 0.29 s 的抖动段（重叠 0.29 s）。选中的是错的那个。
+        sel = [g for g in groups if overlap(g) > 0]
+        if not sel:
+            return {**res, "reason": "按下期间没有检测到运动"
+                                    f"（{len(groups)} 段运动都在按下之前或松手之后）"}
+        m0 = min(g[0] for g in sel)
+        m1 = max(g[1] for g in sel)
+        groups.sort(key=lambda g: g[0])
+    else:
+        # 「取重叠最大的一组」在**所有组都不与按钮窗重叠**时会退化成「取时间最早的一组」——
+        # 那一段往往只是用户按下之前挪了一下手机，不是这次要测的滑动。
+        # 注意 `up_i <= down_i` 那个守卫挡不住这里：它只保证按钮窗长度为正，
+        # 保证不了选中的运动就是这次滑动。按钮窗完全可以又正又与所有运动组零重叠。
+        # 实测：把 100444 的 down_i 换成 up_i（DOWN==UP）它会报 0.06 cm 而不是 15.4 cm。
+        groups.sort(key=overlap, reverse=True)
+        if overlap(groups[0]) <= 0:
+            return {**res, "reason": "按下期间没有检测到运动"
+                                    f"（{len(groups)} 段运动都在按下之前或松手之后）"}
+        m0, m1 = groups[0]
     res.update(motion=(m0, m1), groups=[tuple(g) for g in groups],
-               motionOverlap=overlap(groups[0]) * dt)
+               nMerged=len(sel) if merge_mode == "press" else 1,
+               motionOverlap=overlap(sel[0] if merge_mode == "press" else groups[0]) * dt)
 
     # ---- 3. 窗口 = 运动段 ± 余量，两端必须落在静止段里 ----
     m = max(1, int(MARGIN_S / dt))
@@ -479,7 +510,7 @@ def read_pairs(path):
     return ts, rows
 
 
-def run_dir(d, verbose=True):
+def run_dir(d, verbose=True, merge_mode=MERGE_MODE):
     import re
     acc_ts, acc = read_pairs(os.path.join(d, "acc.csv"))
     gyr_ts, gyr = read_pairs(os.path.join(d, "gyr.csv"))
@@ -502,7 +533,7 @@ def run_dir(d, verbose=True):
             else:
                 hi = mid
         return lo
-    r = measure(acc, gyr, locate(dn), locate(up), dt=dt)
+    r = measure(acc, gyr, locate(dn), locate(up), dt=dt, merge_mode=merge_mode)
     if verbose:
         nm = os.path.basename(d)
         if not r["ok"]:
