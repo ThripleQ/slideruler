@@ -1,0 +1,8 @@
+# Python（sim/）
+__pycache__/
+*.pyc
+.venv/
+
+# 真机取回的原始采集数据不进库（体积大、含设备档案）
+captures/
+*.csv
