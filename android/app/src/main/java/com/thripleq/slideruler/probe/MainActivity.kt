@@ -54,13 +54,15 @@ private const val HEALTH_SECONDS = 30
 private const val TICK_MS = 100L
 
 /**
- * 松手后再采多久才停。
+ * 松手后的「收尾」采集：不是固定时长，而是**采到手机真的停下来为止**。
  *
- * **必须 ≥ 引擎的停稳搜索上限（SlideMeasure.MAX_EXT_S = 1.2 s）**：松手时手机还在动的话，
- * 终点是算法在松手之后才找到的，缓冲区里得先有那段数据。留 0.3 s 余量 ——
- * 换算成用户看到的规则就是：松手后保持手机不动 1.5 s 才出数。
+ * 为什么不能固定：v2 引擎要用「运动结束后那段静止」当终点锚点。松手时手机往往还在动
+ * （手抬起来的 0.1~0.3 s 里手机靠惯性继续前移），那段静止得先采进缓冲区。
+ * 固定 1.5 s 在真机上不够 —— 20261011 的一批采集里，多条记录尾部 0.68 s 全是运动，
+ * 引擎只能拒答。改成"连续静止 [SLIDE_SETTLE_DWELL_MS] 才收工"，上限 [SLIDE_SETTLE_MAX_MS]。
  */
-private const val SLIDE_TAIL_MS = 1500L
+private const val SLIDE_SETTLE_DWELL_MS = 400L
+private const val SLIDE_SETTLE_MAX_MS = 3000L
 
 /**
  * 稳定度指示的基线学习时长。取 2.5 s，和引导文案「先静置 2 秒」对齐：
@@ -126,6 +128,10 @@ class MainActivity : ComponentActivity() {
     private val marks = ArrayList<TouchMark>()
     /** 已收到 UP、正在等尾部静止段采完，期间忽略新的触摸。 */
     private var slidePending = false
+    /** 本次 UP 的时刻（elapsedRealtime）—— 收尾超时用。 */
+    private var upAtMs = 0L
+    /** 从哪一刻开始「连续静止」；0 = 当前不静止、计时没开始。 */
+    private var settleSinceMs = 0L
     /** 上一次测距引擎的耗时（ms）——纯诊断，放进结果里给用户看。 */
     private var lastMeasureMs = 0L
 
@@ -174,6 +180,23 @@ class MainActivity : ComponentActivity() {
             if (durationS > 0 && remain <= 0) {
                 finishCapture()
                 return
+            }
+            // 松手后的收尾：等到手机「连续静止」够久才收工 —— 那段静止是引擎的终点锚点。
+            if (ui.slideMode && slidePending) {
+                val now = SystemClock.elapsedRealtime()
+                if (score < 1.0) {
+                    if (settleSinceMs == 0L) settleSinceMs = now
+                    if (now - settleSinceMs >= SLIDE_SETTLE_DWELL_MS) {
+                        finishSlide()
+                        return
+                    }
+                } else {
+                    settleSinceMs = 0L
+                }
+                if (now - upAtMs >= SLIDE_SETTLE_MAX_MS) {
+                    finishSlide()
+                    return
+                }
             }
             if (ui.recording) main.postDelayed(this, TICK_MS)
         }
@@ -274,6 +297,8 @@ class MainActivity : ComponentActivity() {
         }
         marks.clear()
         slidePending = false
+        settleSinceMs = 0L
+        upAtMs = 0L
         stabMinAcc = Double.MAX_VALUE
         stabMinGyr = Double.MAX_VALUE
         stabFrozen = false
@@ -303,9 +328,11 @@ class MainActivity : ComponentActivity() {
         if (marks.any { it.name == "UP" }) return
         marks.add(TouchMark("UP", eventMs, recvUptimeMs, recvElapsedNs))
         slidePending = true
+        settleSinceMs = 0
+        upAtMs = SystemClock.elapsedRealtime()
         ui = ui.copy(pressed = false, slideTail = true, slideMarks = marks.size)
-        // 再采一小段静止，让终点边界之外也有静止段
-        main.postDelayed({ finishSlide() }, SLIDE_TAIL_MS)
+        // 收尾不设固定时长：交给 ticker —— 连续静止 SLIDE_SETTLE_DWELL_MS 就收工，
+        // 最迟 SLIDE_SETTLE_MAX_MS。v2 引擎要靠这段静止当终点锚点。
     }
 
     private fun finishSlide() {
@@ -334,10 +361,10 @@ class MainActivity : ComponentActivity() {
         )
         ui = ui.copy(
             recording = false, slideMode = false, pressed = false, slideTail = false,
-            error = result?.takeIf { !it.ok }?.let { "测距失败：${it.failReason}" },
+            error = null,
             report = report, savedDir = dir.absolutePath,
             accCount = acc.size, gyrCount = gyr.size,
-            slideDistanceCm = result?.takeIf { it.ok }?.distanceCm,
+            slideDistanceCm = result?.takeIf { it.ok && !it.noMotion }?.distanceCm,
             slideVerdict = result?.let { slideVerdict(it) },
             slideDetail = result?.let { slideDetail(it) },
         )
@@ -361,43 +388,87 @@ class MainActivity : ComponentActivity() {
     /** 一句话结论 —— 用户需要知道这一次是怎么来的。 */
     private fun slideVerdict(r: MeasureResult): String {
         if (!r.ok) return r.failReason ?: "测距失败"
-        return if (r.extended) {
-            "松手时手机还在动 → 算法往前找到真正停稳的位置，补回 " +
-                String.format(Locale.US, "%.0f", r.extendedMs) + " ms"
-        } else {
-            "松手时手机已经停稳（终点速度在阈值内，无需顺延）"
+        if (r.noMotion) return "手机没动（未检测到运动）"
+        if (r.slowMotion) return "移动太慢，分辨不出 —— 请快速滑完"
+        // 模型分歧是最高优先级的坏消息：平台窄只说明端点稳，说明不了残差模型对。
+        // 真机上有四条落进这里（修正量 150%~4587%），它们全都没有独立真值可核对。
+        if (r.modelSensitive) {
+            return String.format(
+                Locale.US, "不可当真：这个数由残差模型决定，不是由数据决定 —— " +
+                    "裸积分 %.2f cm、去趋势 %.2f cm，修正量是答案的 %.0f%%。" +
+                    "平台窄只说明端点稳。请重滑一次（快一点、起手和收手都停稳）",
+                r.bareM * 100, r.distanceM * 100,
+                r.modelGapM / maxOf(r.distanceM, 1e-9) * 100,
+            )
         }
+        val pct = r.confidence * 100.0
+        val band = String.format(Locale.US, "%.2f~%.2f cm", r.plateauLoCm, r.plateauHiCm)
+        val head = if (r.confidence <= 0.02) "稳"
+        else if (r.confidence <= 0.08) "还可以"
+        else "不稳（换个端点就变）"
+        return String.format(
+            Locale.US, "可信度%s：把窗口端点在各侧静止段内挪动，结果在 %s 之间（±%.1f%%）",
+            head, band, pct / 2.0,
+        )
     }
 
     /** 距离下面的诊断：窗口、判据、本机参数。用户看着它判断"这次为什么是这个数"。 */
     private fun slideDetail(r: MeasureResult): String {
         if (!r.ok) return "原因：${r.failReason}"
-        val rel = if (kotlin.math.abs(r.vEndFwd) <= r.threshold) "≤" else ">"
+        if (r.noMotion) {
+            return String.format(
+                Locale.US,
+                "按住 %.2f s，但窗口内没有任何运动（0.2 s 尺度 %s / 0.8 s 尺度 %.4f，阈值 %.4f）\n" +
+                    "本机 |g| %.4f   σ_a %.4f   dt %.3f ms",
+                r.holdS, if (r.slowMotion) "超阈" else "未超阈", r.slowPeak, r.slowThr,
+                r.gravityMag, r.accSigma, r.dt * 1000.0,
+            )
+        }
         return buildString {
             appendLine(
                 String.format(
-                    Locale.US, "窗口 #%d→#%d（按住 %.2f s / 积分 %.2f s / 顺延 %.0f ms）",
-                    r.downIndex, r.endIndex, r.holdS, r.durationS, r.extendedMs,
+                    Locale.US, "按住 %.2f s → 真实运动 %.2f s → 积分窗口 #%d→#%d（%.2f s）",
+                    r.holdS, r.motionS, r.windowStart, r.windowEnd, r.windowS,
                 )
             )
             appendLine(
                 String.format(
-                    Locale.US, "终点速度 %+.4f m/s %s 阈值 %.4f → %s",
-                    r.vEndFwd, rel, r.threshold, if (r.detrended) "矢量去趋势" else "裸积分",
+                    Locale.US, "两端静止锚点 #%d 与 #%d（校准段 %.2f s）  平台 %.2f~%.2f cm",
+                    r.anchorStart, r.anchorEnd, r.calS, r.plateauLoCm, r.plateauHiCm,
                 )
             )
             appendLine(
                 String.format(
-                    Locale.US, "本机 |g| %.4f   σ_a %.4f   |b| %.4f   dt %.3f ms",
-                    r.gravityMag, r.accSigma, r.biasBound, r.dt * 1000.0,
+                    Locale.US, "松手后留下的静止 %.2f s（终点锚点）  锚点漂移 %.5f m/s",
+                    r.tailStaticS, r.anchorDrift,
+                )
+            )
+            appendLine(
+                String.format(
+                    Locale.US, "残差模型：裸积分 %.2f cm / 去趋势 %.2f cm（差 %.2f cm）",
+                    r.bareM * 100, r.distanceM * 100, r.modelGapM * 100,
+                )
+            )
+            appendLine(
+                String.format(
+                    Locale.US, "本机 |g| %.4f   σ_a %.4f   陀螺零偏 %.5f rad/s   dt %.3f ms",
+                    r.gravityMag, r.accSigma, r.gyroBiasNorm, r.dt * 1000.0,
                 )
             )
             append(
-                String.format(
-                    Locale.US, "裸积分对照 %.2f cm   引擎耗时 %d ms",
-                    r.rawDistanceCm, lastMeasureMs,
-                )
+                String.format(Locale.US, "引擎耗时 %d ms", lastMeasureMs),
             )
+            if (r.tailStaticS < SlideMeasure.TAIL_MIN_SECONDS) {
+                append(
+                    String.format(
+                        Locale.US, "   ⚠ 松手后只留了 %.2f s 静止当终点锚点（要 ≥%.2f s），" +
+                            "这个数不可靠 —— 松手后手别碰、多等一会儿",
+                        r.tailStaticS, SlideMeasure.TAIL_MIN_SECONDS,
+                    )
+                )
+            } else if (r.endHitBound) {
+                append("   ⚠ 松手后手机一直没停稳")
+            }
         }
     }
 
@@ -444,8 +515,8 @@ class MainActivity : ComponentActivity() {
             else -> {
                 sb.appendLine(
                     String.format(
-                        Locale.US, "★ 距离 %.2f cm（裸积分 %.2f cm）",
-                        result.distanceCm, result.rawDistanceCm,
+                        Locale.US, "★ 距离 %.2f cm（平台 %.2f~%.2f cm）",
+                        result.distanceCm, result.plateauLoCm, result.plateauHiCm,
                     )
                 )
                 sb.appendLine("  " + slideVerdict(result))
@@ -539,15 +610,30 @@ private fun ProbeScreen(
                         }
                     }
                 }
+            } else if (ui.slideVerdict != null) {
+                // 没给数（或者给的 0）也要把理由摆在显眼位置：拒绝回答本身就是一种答案。
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text("本次没有测到距离", style = MaterialTheme.typography.titleSmall)
+                        Text(ui.slideVerdict, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
+                        ui.slideDetail?.let {
+                            Text(it, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        }
+                    }
+                }
             }
 
             if (ui.slideMode) {
                 Text(
-                    "① 先静置 2 秒（学本机噪声底）→ ② 按住 → ③ 推 → ④ 松手 → " +
-                        "⑤ 保持手机不动 1.5 秒 → 出结果。\n" +
-                        "松手时还在动也不要紧：算法会往前找到手机真正停住的位置补回来。" +
-                        "但松手后手机必须在 1.5 秒内停下 —— 提前把它拿起来就会算不回来。\n" +
-                        "提示：按住到松手尽量控制在 1~2 秒内 —— 拖得越久误差越大。",
+                    "① 把手机放稳，静置 2 秒（学本机噪声底，指示灯变绿）→ ② 按住按钮 → " +
+                        "③ 按住停稳约半秒再推 → ④ 1~2 秒内推完，中间不停 → ⑤ 松手 → " +
+                        "⑥ 手别碰，等手机停稳出数。\n" +
+                        "三条硬规则（都是引擎的硬要求，不是客气话）：\n" +
+                        "· 起手要静：推之前手机得先静止约半秒 —— 这段是引擎的起点锚点兼校准段，" +
+                        "没有它就只能拒答。放稳前别开始推，手指也别晃手机。\n" +
+                        "· 中途别停：推的过程里停顿对距离零贡献、却按 T² 放大零偏误差。" +
+                        "而且要够快 —— 拖到 4 秒误差大一个数量级，慢到 0.8 秒尺度都看不出来时会直接说「分辨不出」。\n" +
+                        "· 收手要静：松手后手别碰，等手机停稳 —— 引擎要靠这段静止当终点锚点。",
                     fontSize = 13.sp,
                 )
                 StabilityBar(ui)
@@ -558,9 +644,9 @@ private fun ProbeScreen(
                 )
                 Text(
                     when {
-                        ui.slideTail -> "已松手 · 保持手机不动，正在算…"
-                        ui.pressed && ui.still -> "● 测量中 · 已静止，可以松手"
-                        ui.pressed -> "● 测量中 · 还在动，别松手"
+                        ui.slideTail -> "已松手 · 手别动，等手机停稳出数…"
+                        ui.pressed && ui.still -> "● 测量中 · 已静止（该推了）"
+                        ui.pressed -> "● 测量中 · 还在动"
                         else -> "按住开始"
                     },
                     fontSize = 13.sp,

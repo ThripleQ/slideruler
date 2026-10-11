@@ -6,3 +6,9 @@ __pycache__/
 # 真机取回的原始采集数据不进库（体积大、含设备档案）
 captures/
 *.csv
+
+# 例外：单测夹具必须进库 —— 它们是 SlideMeasureTest 的真值来源，
+# 缺了 acc.csv / gyr.csv 新克隆就跑不了 testDebugUnitTest。
+# （2026-10-11 修：此前 090006 / 091811 只有 meta.txt 进了库，数据文件被上面的 *.csv 挡掉了，
+#   而本地因为文件一直在，单测是绿的 —— 这种"只在别处失败"的坑最难查。）
+!android/app/src/test/resources/fixtures/**/*.csv
