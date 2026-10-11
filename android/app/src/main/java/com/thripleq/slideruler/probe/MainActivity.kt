@@ -54,10 +54,13 @@ private const val HEALTH_SECONDS = 30
 private const val TICK_MS = 100L
 
 /**
- * 松手后再采多久才停。用来把"终点静止段"纳入缓冲区 ——
- * 按钮方案的终点边界不需要精确（落在静止段内即安全），但静止段本身要采到。
+ * 松手后再采多久才停。
+ *
+ * **必须 ≥ 引擎的停稳搜索上限（SlideMeasure.MAX_EXT_S = 1.2 s）**：松手时手机还在动的话，
+ * 终点是算法在松手之后才找到的，缓冲区里得先有那段数据。留 0.3 s 余量 ——
+ * 换算成用户看到的规则就是：松手后保持手机不动 1.5 s 才出数。
  */
-private const val SLIDE_TAIL_MS = 700L
+private const val SLIDE_TAIL_MS = 1500L
 
 /**
  * 稳定度指示的基线学习时长。取 2.5 s，和引导文案「先静置 2 秒」对齐：
@@ -94,7 +97,15 @@ data class UiState(
     // ---- 滑动测量（按住式边界）----
     val slideMode: Boolean = false,
     val pressed: Boolean = false,
+    /** 已松手、正在补采尾部静止段。这 1.5 s 里别动手机，算法要靠它定终点。 */
+    val slideTail: Boolean = false,
     val slideMarks: Int = 0,
+    /** 本次测出的距离（cm）。null = 还没测或没测出来。 */
+    val slideDistanceCm: Double? = null,
+    /** 一句话结论：这一次可不可信。 */
+    val slideVerdict: String? = null,
+    /** 距离下面的诊断细节（窗口 / 判据 / 本机参数）。 */
+    val slideDetail: String? = null,
     // ---- 实时稳定度指示 ----
     val still: Boolean = false,
     val stabScore: Double = 0.0,
@@ -115,6 +126,8 @@ class MainActivity : ComponentActivity() {
     private val marks = ArrayList<TouchMark>()
     /** 已收到 UP、正在等尾部静止段采完，期间忽略新的触摸。 */
     private var slidePending = false
+    /** 上一次测距引擎的耗时（ms）——纯诊断，放进结果里给用户看。 */
+    private var lastMeasureMs = 0L
 
     /**
      * 稳定度指示用的「本机噪声地板」——录制过程中持续取到的最小值。
@@ -268,9 +281,10 @@ class MainActivity : ComponentActivity() {
         startMs = SystemClock.elapsedRealtime()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         ui = ui.copy(
-            recording = true, slideMode = true, pressed = false, slideMarks = 0,
+            recording = true, slideMode = true, pressed = false, slideTail = false, slideMarks = 0,
             mode = "滑动测量（按住式）", totalS = 0, remainS = 0,
             report = null, savedDir = null, error = null,
+            slideDistanceCm = null, slideVerdict = null, slideDetail = null,
         )
         main.removeCallbacks(ticker)
         main.postDelayed(ticker, TICK_MS)
@@ -289,7 +303,7 @@ class MainActivity : ComponentActivity() {
         if (marks.any { it.name == "UP" }) return
         marks.add(TouchMark("UP", eventMs, recvUptimeMs, recvElapsedNs))
         slidePending = true
-        ui = ui.copy(pressed = false, slideMarks = marks.size)
+        ui = ui.copy(pressed = false, slideTail = true, slideMarks = marks.size)
         // 再采一小段静止，让终点边界之外也有静止段
         main.postDelayed({ finishSlide() }, SLIDE_TAIL_MS)
     }
@@ -306,21 +320,85 @@ class MainActivity : ComponentActivity() {
         val gyr = recorder.gyrSamples().toList()
         if (acc.size < 100 || gyr.size < 100) {
             ui = ui.copy(
-                recording = false, slideMode = false, pressed = false,
+                recording = false, slideMode = false, pressed = false, slideTail = false,
                 error = "样本太少（acc ${acc.size} / gyr ${gyr.size}），本次不保存",
             )
             return
         }
 
-        val report = buildSlideReport(acc, gyr.size)
+        // 设备端出数。以前距离只能 adb pull 回 PC 再算 —— 那就不是一把尺子。
+        val result = measureSlide(acc, gyr)
+        val report = buildSlideReport(acc, gyr.size, result)
         val dir = CaptureStore.save(
             this, acc, gyr, recorder.accLabel, recorder.gyrLabel, report, marks.toList(),
         )
         ui = ui.copy(
-            recording = false, slideMode = false, pressed = false, error = null,
+            recording = false, slideMode = false, pressed = false, slideTail = false,
+            error = result?.takeIf { !it.ok }?.let { "测距失败：${it.failReason}" },
             report = report, savedDir = dir.absolutePath,
             accCount = acc.size, gyrCount = gyr.size,
+            slideDistanceCm = result?.takeIf { it.ok }?.distanceCm,
+            slideVerdict = result?.let { slideVerdict(it) },
+            slideDetail = result?.let { slideDetail(it) },
         )
+    }
+
+    /** 跑一次测距引擎。没拿到完整的 DOWN/UP 就不测（返回 null）。 */
+    private fun measureSlide(acc: List<Sample>, gyr: List<Sample>): MeasureResult? {
+        val down = marks.firstOrNull { it.name == "DOWN" } ?: return null
+        val up = marks.firstOrNull { it.name == "UP" } ?: return null
+        val t0 = SystemClock.elapsedRealtime()
+        val r = SlideMeasure.measure(
+            acc.map { it.toPt3() },
+            gyr.map { it.toPt3() },
+            down.recvElapsedNs,
+            up.recvElapsedNs,
+        )
+        lastMeasureMs = SystemClock.elapsedRealtime() - t0
+        return r
+    }
+
+    /** 一句话结论 —— 用户需要知道这一次是怎么来的。 */
+    private fun slideVerdict(r: MeasureResult): String {
+        if (!r.ok) return r.failReason ?: "测距失败"
+        return if (r.extended) {
+            "松手时手机还在动 → 算法往前找到真正停稳的位置，补回 " +
+                String.format(Locale.US, "%.0f", r.extendedMs) + " ms"
+        } else {
+            "松手时手机已经停稳（终点速度在阈值内，无需顺延）"
+        }
+    }
+
+    /** 距离下面的诊断：窗口、判据、本机参数。用户看着它判断"这次为什么是这个数"。 */
+    private fun slideDetail(r: MeasureResult): String {
+        if (!r.ok) return "原因：${r.failReason}"
+        val rel = if (kotlin.math.abs(r.vEndFwd) <= r.threshold) "≤" else ">"
+        return buildString {
+            appendLine(
+                String.format(
+                    Locale.US, "窗口 #%d→#%d（按住 %.2f s / 积分 %.2f s / 顺延 %.0f ms）",
+                    r.downIndex, r.endIndex, r.holdS, r.durationS, r.extendedMs,
+                )
+            )
+            appendLine(
+                String.format(
+                    Locale.US, "终点速度 %+.4f m/s %s 阈值 %.4f → %s",
+                    r.vEndFwd, rel, r.threshold, if (r.detrended) "矢量去趋势" else "裸积分",
+                )
+            )
+            appendLine(
+                String.format(
+                    Locale.US, "本机 |g| %.4f   σ_a %.4f   |b| %.4f   dt %.3f ms",
+                    r.gravityMag, r.accSigma, r.biasBound, r.dt * 1000.0,
+                )
+            )
+            append(
+                String.format(
+                    Locale.US, "裸积分对照 %.2f cm   引擎耗时 %d ms",
+                    r.rawDistanceCm, lastMeasureMs,
+                )
+            )
+        }
     }
 
     /** 用户取消本次滑动测量（未松手就退出 / 按了取消）。 */
@@ -330,12 +408,12 @@ class MainActivity : ComponentActivity() {
         if (recorder.isRecording) recorder.stop()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         ui = ui.copy(
-            recording = false, slideMode = false, pressed = false,
+            recording = false, slideMode = false, pressed = false, slideTail = false,
             totalS = 0, remainS = 0, error = null,
         )
     }
 
-    private fun buildSlideReport(acc: List<Sample>, gyrCount: Int): String {
+    private fun buildSlideReport(acc: List<Sample>, gyrCount: Int, result: MeasureResult?): String {
         if (acc.isEmpty()) return "（无样本）"
         val t0 = acc.first().tNs
         val sb = StringBuilder()
@@ -359,6 +437,20 @@ class MainActivity : ComponentActivity() {
         if (down != null && up != null) {
             val spanMs = (up.eventMs - down.eventMs)
             sb.appendLine(String.format(Locale.US, "按住时长（事件时刻之差） %d ms", spanMs))
+        }
+        when {
+            result == null -> sb.appendLine("未捕获到完整的 DOWN/UP —— 本次无法测距")
+            !result.ok -> sb.appendLine("测距失败：${result.failReason}")
+            else -> {
+                sb.appendLine(
+                    String.format(
+                        Locale.US, "★ 距离 %.2f cm（裸积分 %.2f cm）",
+                        result.distanceCm, result.rawDistanceCm,
+                    )
+                )
+                sb.appendLine("  " + slideVerdict(result))
+                sb.appendLine("  " + slideDetail(result).replace('\n', ' ').trim())
+            }
         }
         return sb.toString()
     }
@@ -426,10 +518,35 @@ private fun ProbeScreen(
                 }
             }
 
+            val distanceCm = ui.slideDistanceCm
+            if (distanceCm != null) {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(
+                        Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text("距离", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "${f(distanceCm, 2)} cm",
+                            fontSize = 40.sp,
+                            fontFamily = FontFamily.Monospace,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        ui.slideVerdict?.let { Text(it, fontSize = 13.sp) }
+                        ui.slideDetail?.let {
+                            Text(it, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        }
+                    }
+                }
+            }
+
             if (ui.slideMode) {
                 Text(
-                    "① 先静置 2 秒（学本机噪声底）→ ② 按住 → ③ 稍停 → ④ 推 → " +
-                        "⑤ 停稳，等指示灯变绿 → ⑥ 立刻松手，别再碰手机。\n" +
+                    "① 先静置 2 秒（学本机噪声底）→ ② 按住 → ③ 推 → ④ 松手 → " +
+                        "⑤ 保持手机不动 1.5 秒 → 出结果。\n" +
+                        "松手时还在动也不要紧：算法会往前找到手机真正停住的位置补回来。" +
+                        "但松手后手机必须在 1.5 秒内停下 —— 提前把它拿起来就会算不回来。\n" +
                         "提示：按住到松手尽量控制在 1~2 秒内 —— 拖得越久误差越大。",
                     fontSize = 13.sp,
                 )
@@ -440,10 +557,11 @@ private fun ProbeScreen(
                     onUp = onSlideUp,
                 )
                 Text(
-                    if (ui.pressed) {
-                        if (ui.still) "● 测量中 · 已静止，可以松手" else "● 测量中 · 还在动，别松手"
-                    } else {
-                        "按住开始"
+                    when {
+                        ui.slideTail -> "已松手 · 保持手机不动，正在算…"
+                        ui.pressed && ui.still -> "● 测量中 · 已静止，可以松手"
+                        ui.pressed -> "● 测量中 · 还在动，别松手"
+                        else -> "按住开始"
                     },
                     fontSize = 13.sp,
                     textAlign = TextAlign.Center,

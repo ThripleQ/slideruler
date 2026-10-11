@@ -1,0 +1,23 @@
+# slideruler 采集档案
+时间      2026-10-11 09:00:06
+设备      Xiaomi M2012K11AC
+系统      Android 13 (API 33)
+ABI       arm64-v8a, armeabi-v7a, armeabi
+请求周期  10000 µs (100 Hz)
+加速度计  lsm6dso Accelerometer Non-wakeup STMicro · 最快 416 Hz · 量程 78.4532
+陀螺仪    lsm6dso Gyroscope Non-wakeup STMicro · 最快 416 Hz · 量程 17.452517
+样本数    acc 1625 / gyr 1627
+丢样阈值  dt > 50 ms
+
+触摸事件（按住式边界）
+  recv_elapsed_ns 与 acc.csv 的时间戳同基准，可直接对齐；
+  输入延迟 = recv_uptime_ms - event_ms（同一 uptime 基准，仅 ms 精度）
+  DOWN event=894872141 ms  recv_uptime=894872145 ms  recv_elapsed=2724391025587971 ns  相对首样本=10372.943 ms  输入延迟=4 ms
+  UP   event=894876539 ms  recv_uptime=894876540 ms  recv_elapsed=2724395420742604 ns  相对首样本=14768.098 ms  输入延迟=1 ms
+
+滑动测量（按住式边界）
+样本  acc 1625 / gyr 1627
+DOWN  相对首样本 10372.9 ms  输入延迟 4 ms
+UP  相对首样本 14768.1 ms  输入延迟 1 ms
+按住时长（事件时刻之差） 4398 ms
+
