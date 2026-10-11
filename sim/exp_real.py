@@ -24,12 +24,21 @@ import measure2
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                     "android", "captures", "slideruler")
 
-# 用户肉眼估的真值（cm），本身 ±0.5 cm —— 只用来看趋势
+# 真值（cm）。两档可信度，别混为一谈：
+#   HARD —— 2026-10-11 14:37 用 15 cm 直尺测的三次，用户明确"姿态比较随意"。
+#           这是本项目第一批**硬真值**，能判到 1% 量级。
+#   SOFT —— 用户肉眼估的 15 cm，本身 ±0.5 cm（±3.3%），只能看趋势。
 TRUTH_CM = {
+    "20261011_143719": 15.0,
+    "20261011_143725": 15.0,
+    "20261011_143734": 15.0,
+}
+HARD = set(TRUTH_CM)
+TRUTH_CM.update({
     "20261011_100444": 15.0,
     "20261011_100459": 15.0,
     "20261011_100529": 15.0,
-}
+})
 
 
 def load(d):
@@ -96,7 +105,8 @@ def main():
         t = TRUTH_CM.get(nm)
         note = ""
         if t:
-            note = "真值%.1f  %+.1f%%" % (t, (v - t) / t * 100)
+            note = ("真值%.1f(硬) %+.1f%%" if nm in HARD else "真值%.1f(估) %+.1f%%") % (
+                t, (v - t) / t * 100)
         if m.get("modelSensitive"):
             note += " ⚠模型敏感"
         rows.append((nm, v, m.get("imuDistM", 0) * 100, m.get("leverM", 0) * 100,
@@ -108,11 +118,14 @@ def main():
 
     print("-" * 104)
     print("给出数值 %d / 拒答 %d" % (n_ok, n_rej))
-    with_truth = [r for r in rows if r[6]]
-    if with_truth:
-        errs = [(r[1] - r[6]) / r[6] * 100 for r in rows if r[6]]
-        print("有真值的 %d 条相对误差：%s  平均 %+.2f%%"
-              % (len(errs), "  ".join("%+.1f%%" % e for e in errs), statistics.fmean(errs)))
+    for tag, sel in (("硬真值", [r for r in rows if r[0] in HARD]),
+                     ("肉眼估", [r for r in rows if r[6] and r[0] not in HARD])):
+        if not sel:
+            continue
+        errs = [(r[1] - r[6]) / r[6] * 100 for r in sel]
+        print("%s %d 条相对误差：%s  平均 %+.2f%%  最大 |%.2f%%|"
+              % (tag, len(errs), "  ".join("%+.1f%%" % e for e in errs),
+                 statistics.fmean(errs), max(abs(e) for e in errs)))
     if rows:
         print("平台宽度中位数 %.2f cm" % statistics.median(
             [r[4][1] - r[4][0] for r in rows]))

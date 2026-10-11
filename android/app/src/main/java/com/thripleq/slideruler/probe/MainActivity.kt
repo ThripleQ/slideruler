@@ -401,6 +401,17 @@ class MainActivity : ComponentActivity() {
                 r.modelGapM / maxOf(r.distanceM, 1e-9) * 100,
             )
         }
+        // 滑太慢：陀螺零偏游走 → 姿态漂移 → 重力泄漏，误差随时长**立方**增长。
+        // 硬真值实测（15 cm）：滑 0.69 s 误差 -6.5%；滑 1.4~1.5 s 误差 -22%/+6% 且互不稳定。
+        // 上界超过读数时，平台带宽已经没有意义 —— 最重要的建议是"重滑、快一点"。
+        if (r.attBudgetM > r.distanceM) {
+            return String.format(
+                Locale.US, "读数可能不准：滑动用时 %.2f s 太长 —— 陀螺漂移的误差上界 " +
+                    "%.1f cm 已超过读数本身。误差随滑动时长的**立方**增长" +
+                    "（滑快一倍，误差降到 1/8），请一口气快些滑完、别在中途停顿",
+                r.motionS, r.attBudgetM * 100,
+            )
+        }
         val pct = r.confidence * 100.0
         val band = String.format(Locale.US, "%.2f~%.2f cm", r.plateauLoCm, r.plateauHiCm)
         val head = if (r.confidence <= 0.02) "稳"
@@ -459,6 +470,12 @@ class MainActivity : ComponentActivity() {
                 String.format(
                     Locale.US, "本机 |g| %.4f   σ_a %.4f   陀螺零偏 %.5f rad/s   dt %.3f ms",
                     r.gravityMag, r.accSigma, r.gyroBiasNorm, r.dt * 1000.0,
+                )
+            )
+            appendLine(
+                String.format(
+                    Locale.US, "陀螺零偏游走 %.4f rad/s（τ=%.2f s）→ 姿态漂移上界 %.1f cm（∝T³）",
+                    r.gyroInstability, r.gyroInstTauS, r.attBudgetM * 100,
                 )
             )
             append(

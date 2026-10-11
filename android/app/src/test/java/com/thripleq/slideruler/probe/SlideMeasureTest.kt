@@ -73,18 +73,54 @@ class SlideMeasureTest {
         val f = load("20261011_100444")
         val r = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs, 0.0, -0.09, 0.0)
         assertTrue(r.ok)
-        assertEquals("测量头位移", 0.1442623044500182, r.distanceM, tol)
-        assertEquals("IMU 位移（应与不带 headR 时一致）", 0.15415568278434755, r.imuDistM, tol)
-        assertEquals("杠杆臂项", 0.0099533568596610264, r.leverM, tol)
-        assertEquals("裸积分也要加杠杆臂项", 0.14910489926335033, r.bareM, 1e-6)
-        assertEquals("平台下界（端点在动，杠杆臂一起扫）", 0.14385566028897043, r.plateauLoM, tol)
-        assertEquals("平台上界", 0.14426288473734847, r.plateauHiM, tol)
+        assertEquals("测量头位移", 0.14426168222690888, r.distanceM, tol)
+        assertEquals("IMU 位移（应与不带 headR 时一致）", 0.15415506077049201, r.imuDistM, tol)
+        assertEquals("杠杆臂项", 0.0099533247435707912, r.leverM, tol)
+        assertEquals("裸积分也要加杠杆臂项", 0.14278939325128673, r.bareM, 1e-6)
+        assertEquals("平台下界（端点在动，杠杆臂一起扫）", 0.14385469818057917, r.plateauLoM, tol)
+        assertEquals("平台上界", 0.14426211040095777, r.plateauHiM, tol)
 
         // 关掉杠杆臂时必须逐位回到 v3 的答案 —— 这是"默认不改变行为"的守卫
         val v3 = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs)
         assertEquals("headR=0 时 distanceM 必须等于 imuDistM", v3.distanceM, v3.imuDistM, 0.0)
         assertEquals("headR=0 时杠杆臂项必须为 0", 0.0, v3.leverM, 0.0)
-        assertEquals("headR=0 时必须复现 v3 的距离", 0.15415568278434755, v3.distanceM, tol)
+        assertEquals("headR=0 时必须复现 v3 的距离", 0.15415506077049201, v3.distanceM, tol)
+    }
+
+    /**
+     * 姿态漂移预算 ∝ T³：陀螺零偏的**游走**抹不掉，它变成姿态漂移 → 重力泄漏，
+     * 位移误差上界 = (1/6)·g·σ_bg·√(T/τ)·T³。这是"对操作要求高"的物理根源，
+     * 也是最强的操作杠杆：滑快一倍，误差降到 1/8。
+     *
+     * 硬真值（15 cm 直尺，2026-10-11）：
+     *  · 143734 滑 0.69 s → 预算 5.4 cm，实际误差 1.4 cm；
+     *  · 143719 滑 1.44 s → 预算 27.4 cm，实际误差 3.1 cm；
+     *  · 143725 滑 1.49 s → 预算 35.7 cm，实际误差 1.2 cm。
+     * 预算是保守上界，但 T 的立方关系与实际误差的走向一致 —— 滑得慢的那两条
+     * 误差方向都开始乱（−21% / +8%），快的那个方向一致（−89% 是窗口问题，另案）。
+     * 期望值由 sim/measure2.py 在同一份夹具上产出。
+     */
+    @Test
+    fun `姿态漂移预算 - 与Python逐位一致且上界超过读数时要能报警`() {
+        val f = load("20261011_100444")
+        val r = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs)
+        assertTrue(r.ok)
+        assertEquals("陀螺零偏游走 σ", 0.00035816660652023468, r.gyroInstability, 1e-9)
+        assertEquals("游走的时间尺度 τ", 0.076109999999999997, r.gyroInstTauS, 1e-9)
+        assertEquals("姿态漂移上界", 0.051061713010602763, r.attBudgetM, tol)
+        // 这条滑了 2.19 s 但零偏特别稳（0.00036 rad/s），预算 5.1 cm < 读数 15.4 cm —— 不报
+        assertTrue("预算 5.1 cm < 读数 15.4 cm，不该触发慢滑动报警",
+            r.attBudgetM <= r.distanceM)
+
+        // 硬真值 143719：滑 1.44 s，零偏游走 0.012 rad/s → 预算 27.4 cm > 15 cm 读数 —— 必须报
+        val g = load("20261011_143719")
+        val rg = SlideMeasure.measure(g.acc, g.gyr, g.downNs, g.upNs)
+        assertTrue(rg.ok)
+        assertEquals("陀螺零偏游走 σ（真机硬真值）", 0.012304473000221985, rg.gyroInstability, 1e-9)
+        assertEquals("τ", 0.24736696400000002, rg.gyroInstTauS, 1e-9)
+        assertEquals("姿态漂移上界 27.4 cm", 0.27445291659455828, rg.attBudgetM, tol)
+        assertTrue("预算 27.4 cm > 读数 11.9 cm —— 慢滑动报警的判据成立",
+            rg.attBudgetM > rg.distanceM)
     }
 
     @Test
@@ -104,9 +140,9 @@ class SlideMeasureTest {
         val r = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs)
         assertTrue(r.ok)
         assertFalse(r.noMotion)
-        assertEquals("距离", 0.15415568278434755, r.distanceM, tol)
-        assertEquals("平台下界", 0.15374404190282473, r.plateauLoM, tol)
-        assertEquals("平台上界", 0.15415567595495647, r.plateauHiM, tol)
+        assertEquals("距离", 0.15415506077049201, r.distanceM, tol)
+        assertEquals("平台下界", 0.15374307803284132, r.plateauLoM, tol)
+        assertEquals("平台上界", 0.15415500053000761, r.plateauHiM, tol)
         // 判据本身：运动段、窗口、两侧锚点
         assertEquals("运动段起点 #431", 431, r.motionIndex)
         assertEquals("窗口起点 #416", 416, r.windowStart)
@@ -118,11 +154,11 @@ class SlideMeasureTest {
         assertEquals("校准段", 0.33298125, r.calS, 1e-6)
         assertEquals("松手后留下的静止", 0.27589874999999997, r.tailStaticS, 1e-6)
         assertFalse("尾部静止足够，不该报终点锚点问题", r.endHitBound)
-        // 裸积分与去趋势只差 3% —— 残差模型分歧小，这个数由数据决定
-        assertEquals("裸积分", 0.1588530524781836, r.bareM, 1e-6)
-        assertEquals("模型分歧", 0.004697369693836051, r.modelGapM, 1e-6)
+        // 裸积分与去趋势只差 1% —— 残差模型分歧小，这个数由数据决定
+        assertEquals("裸积分", 0.15259275303446607, r.bareM, 1e-6)
+        assertEquals("模型分歧", 0.0015623077360259474, r.modelGapM, 1e-6)
         assertFalse("修正量远小于答案，不该报模型敏感", r.modelSensitive)
-        assertEquals("锚点漂移", 0.023303692808520592, r.anchorDrift, 1e-9)
+        assertEquals("锚点漂移", 0.01714653384141511, r.anchorDrift, 1e-9)
         assertEquals("实测重力模长", 9.913901720863374, r.gravityMag, 1e-9)
         assertEquals("静止段噪声地板", 0.013673987754797903, r.accSigma, 1e-9)
         assertTrue("平台应当很窄", r.confidence < 0.02)
@@ -133,9 +169,9 @@ class SlideMeasureTest {
         val f = load("20261011_100459")
         val r = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs)
         assertTrue(r.ok)
-        assertEquals("距离", 0.15753003184370357, r.distanceM, tol)
-        assertEquals("平台下界", 0.1568815289498855, r.plateauLoM, tol)
-        assertEquals("平台上界", 0.1640571877892311, r.plateauHiM, tol)
+        assertEquals("距离", 0.15753443241336959, r.distanceM, tol)
+        assertEquals("平台下界", 0.15688152894988547, r.plateauLoM, tol)
+        assertEquals("平台上界", 0.16440202078475305, r.plateauHiM, tol)
         assertEquals(439, r.motionIndex)
         assertEquals(424, r.windowStart)
         assertEquals(723, r.windowEnd)
@@ -157,9 +193,9 @@ class SlideMeasureTest {
         val f = load("20261011_100409")
         val r = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs)
         assertTrue(r.ok)
-        assertEquals("距离", 0.06847493525602662, r.distanceM, tol)
-        assertEquals("平台下界", 0.06312887473580532, r.plateauLoM, tol)
-        assertEquals("平台上界", 0.07605511186398839, r.plateauHiM, tol)
+        assertEquals("距离", 0.068495773219678827, r.distanceM, tol)
+        assertEquals("平台下界", 0.063128874735805363, r.plateauLoM, tol)
+        assertEquals("平台上界", 0.076192867045050169, r.plateauHiM, tol)
         assertEquals(400, r.motionIndex)
         assertEquals(385, r.windowStart)
         assertEquals(694, r.windowEnd)
@@ -173,30 +209,33 @@ class SlideMeasureTest {
     /**
      * 修正量超过答案本身 —— 这个数由**模型假设**决定，平台窄救不了它。
      *
-     * 100409 的裸积分 24.67 cm 被去趋势修成 6.85 cm，修正量是答案的 2.6 倍：
-     * 答案是两个大数之差。此时平台扫描给出的 6.31~7.61（19%）看着还行，
-     * 但平台只反映**端点抖动**，反映不了「残差到底是不是线性的」这个模型分歧。
+     * 122416 的裸积分 537 cm 被去趋势修成 147 cm，修正量是答案的 2.7 倍：
+     * 答案是两个大数之差，换一个残差模型就换一个答案。
      *
-     * 立这条判据的依据是真机分界很干净：三条有真值（15 cm）的是 3% / 16% / 46% 都没超，
-     * 四条没有真值的是 150% / 260% / 590% / 4587% 全超。见 sim/compare_v1_v2.py。
-     * 它的误报率在仿真里极低（干净静止段 + 完美常量零偏，B/C/D/E 组 0/12）。
+     * ⚠ 这条以前用的是 100409。修掉姿态初始化错位（校准段之前转过的角度没被计入）
+     * 之后，100409 的修正量从答案的 260% 降到 26%，不再触发 —— 也就是说那条数据
+     * 原先的"模型敏感"其实是姿态 bug 的症状，不是模型分歧。判据本身没变，
+     * 是它该报的那批数据变少了：真机 32 条里从 20 条降到 8 条。
+     *
+     * 立这条判据的依据是真机分界很干净：三条有硬真值的是 1% / 4% / 3% 都没超，
+     * 而没有真值的那批（150% / 260% / 590% / 4587%）全超。见 sim/compare_v1_v2.py。
      */
     @Test
     fun `修正量超过答案本身 - 必须判为模型敏感而不是高可信`() {
-        val f = load("20261011_100409")
+        val f = load("20261011_122416")
         val r = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs)
         assertTrue(r.ok)
-        assertEquals("裸积分", 0.2467165805266843, r.bareM, 1e-6)
-        assertEquals("模型分歧", 0.17824164527065767, r.modelGapM, 1e-6)
-        assertTrue("修正量是答案的 2.6 倍 → 必须报模型敏感", r.modelSensitive)
-        assertEquals("锚点漂移", 0.2113703912072919, r.anchorDrift, 1e-9)
+        assertEquals("裸积分", 5.370998356219733, r.bareM, 1e-6)
+        assertEquals("模型分歧", 3.9022209851532157, r.modelGapM, 1e-6)
+        assertTrue("修正量是答案的 2.7 倍 → 必须报模型敏感", r.modelSensitive)
+        assertEquals("锚点漂移", 3.4695023245087975, r.anchorDrift, 1e-9)
 
-        // 对照：修正量 46%（< 100%）的那条不该触发 —— 判据不能把所有去趋势都当成可疑
+        // 对照：修正量只有 21% 的那条不该触发 —— 判据不能把所有去趋势都当成可疑
         val g = load("20261011_100459")
         val rg = SlideMeasure.measure(g.acc, g.gyr, g.downNs, g.upNs)
-        assertEquals("裸积分", 0.08527852130552778, rg.bareM, 1e-6)
-        assertEquals("模型分歧", 0.072251510538175787, rg.modelGapM, 1e-6)
-        assertFalse("46% < 100%，不该报模型敏感", rg.modelSensitive)
+        assertEquals("裸积分", 0.12411948074406344, rg.bareM, 1e-6)
+        assertEquals("模型分歧", 0.03341495166930615, rg.modelGapM, 1e-6)
+        assertFalse("21% < 100%，不该报模型敏感", rg.modelSensitive)
     }
 
     /**
@@ -314,7 +353,7 @@ class SlideMeasureTest {
         assertEquals("窗口起点", 241, r.windowStart)
         assertEquals("窗口终点", 653, r.windowEnd)
         assertEquals("这次按住被静止检测切成了 5 段，必须全部合并", 5, r.mergedRuns)
-        assertEquals("距离", 1.5724710059332478, r.distanceM, tol)
+        assertEquals("距离", 1.4687773710665171, r.distanceM, tol)
         assertTrue("这个数必须由模型敏感旗标点名", r.modelSensitive)
     }
 
@@ -330,10 +369,10 @@ class SlideMeasureTest {
         assertTrue(r.ok)
         assertEquals("合并后起点要包含那段小抖动", 176, r.motionIndex)
         assertEquals("窗内两段被合并", 2, r.mergedRuns)
-        assertEquals("距离", 0.11536077799076491, r.distanceM, tol)
+        assertEquals("距离", 0.11536674154293602, r.distanceM, tol)
         // 注意：Python 的 plateau 导出的单位是 cm，Kotlin 的 plateauLoM/HiM 是 m
-        assertEquals("平台下界 11.36cm", 0.11355606642146324, r.plateauLoM, tol)
-        assertEquals("平台上界 11.79cm", 0.11790405606335026, r.plateauHiM, tol)
+        assertEquals("平台下界 11.36cm", 0.1135608288905269, r.plateauLoM, tol)
+        assertEquals("平台上界 11.79cm", 0.11791511985520732, r.plateauHiM, tol)
         assertFalse("干净数据不该报模型敏感", r.modelSensitive)
     }
 

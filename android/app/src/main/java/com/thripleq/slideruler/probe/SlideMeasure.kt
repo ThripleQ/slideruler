@@ -59,7 +59,8 @@ private const val TAIL_S = 2.5             // UP 之后最多再看这么久
 private const val PRE_S = 2.0              // DOWN 之前最多往回看这么久
 private const val GAP_S = 0.15             // 两段运动之间隔这么久以内算同一段
 private const val ALPHA = 0.05             // 互补滤波系数
-private const val GATE_RAD = 0.30          // 加速度修正门限
+private const val GATE_RAD = 0.30          // 加速度修正门限（预测/实测重力方向夹角），仅 gMag 未知时用
+private const val GATE_MAG_FRAC = 0.25     // |acc| 偏离 |g| 超过这个比例就不修正（见 solveAttitude）
 private const val PLATEAU_GRID = 5         // 平台扫描点数
 // 「修正量相对答案」的上限：|裸积分 − 去趋势| 超过 max(答案, 该下限) 就报"模型敏感"。
 // 0.02 m 这个下限是为了避免小距离时被绝对噪声误报。
@@ -128,6 +129,16 @@ class MeasureResult(
     val dt: Double = 0.0,
     val slowPeak: Double = 0.0,
     val slowThr: Double = 0.0,
+    /** 陀螺零偏**不稳定性**（rad/s，τ 尺度）：静止段内分段均值之差 /√2。抹不掉的那部分。 */
+    val gyroInstability: Double = 0.0,
+    /** 上面的估计所依据的时间尺度（秒）。 */
+    val gyroInstTauS: Double = 0.0,
+    /**
+     * 姿态漂移造成的位移误差**上界**（米）：(1/6)·g·σ_bg·√(T/τ)·T³。
+     * **∝ T³** —— 滑动时间减半，误差降到 1/8，比任何算法微调都管用。
+     * 保守上界（假设游走全朝一个方向），只作操作引导，不据此拒答。
+     */
+    val attBudgetM: Double = 0.0,
 ) {
     val distanceCm: Double get() = distanceM * 100.0
     val plateauLoCm: Double get() = plateauLoM * 100.0
@@ -377,7 +388,8 @@ object SlideMeasure {
         }
 
         // ---- 6. 姿态（加速度修正只在静止段开，运动中纯陀螺外推）----
-        val qs = solveAttitude(ax, ay, az, gx, gy, gz, bias, gRef, flags, dt)
+        val qs = solveAttitude(ax, ay, az, gx, gy, gz, bias, gRef, flags, dt,
+            i0 = calLo, gMag = gMag)
 
         // ---- 7. 去重力（用实测 |g|，不是 9.81）----
         val lx = DoubleArray(n); val ly = DoubleArray(n); val lz = DoubleArray(n)
@@ -436,6 +448,13 @@ object SlideMeasure {
         }
         if (plo > phi) { plo = distHead; phi = distHead }
 
+        // ---- 10. 姿态漂移的误差上界 ∝ T³ ----
+        // "对操作要求高"的物理根源：陀螺零偏的游走抹不掉，它在运动段里变成
+        // 姿态漂移 → 重力泄漏 → 位移误差 ∝ T³。滑快一倍，误差降到 1/8。
+        // 只作操作引导，不据此拒答 —— 它是保守上界（假设游走全朝一个方向）。
+        val inst = gyroBiasInstability(gx, gy, gz, run0, dt)
+        val attBudget = attitudeDriftBudget(gMag, inst[0], inst[1], (w1 - w0) * dt)
+
         return MeasureResult(
             ok = true,
             distanceM = distHead,
@@ -463,6 +482,9 @@ object SlideMeasure {
             accSigma = sigma,
             gyroBiasNorm = bias.norm(),
             dt = dt,
+            gyroInstability = inst[0],
+            gyroInstTauS = inst[1],
+            attBudgetM = attBudget,
         )
     }
 }
@@ -526,6 +548,48 @@ private fun runContaining(flags: BooleanArray, i: Int, n: Int): IntArray {
     return intArrayOf(a, b)
 }
 
+/**
+ * 静止段内估计陀螺零偏**不稳定性**（不是零偏本身）。
+ *
+ * 零偏的常值部分能被校准段平均掉；抹不掉的是它在测量时长内的游走，
+ * 而那正是姿态漂移 → 重力泄漏的源头。做法：把静止段切成 4 段，
+ * 相邻段均值之差的模长 /√2 就是该时长尺度上零偏变化的 σ。
+ *
+ * 返回 (σ rad/s, τ s)；τ 是估计所依据的时间尺度，外推到其他时长用 √(T/τ)。
+ * 静止段太短（<16 样本）时返回 (0, 0) = 不可估。
+ */
+private fun gyroBiasInstability(
+    gx: DoubleArray, gy: DoubleArray, gz: DoubleArray,
+    run: IntArray, dt: Double,
+): DoubleArray {
+    val a = run[0]; val b = run[1]; val n = b - a
+    if (n < 16) return doubleArrayOf(0.0, 0.0)
+    val h = max(4, n / 4)
+    val k = n / h
+    if (k < 2) return doubleArrayOf(0.0, 0.0)
+    val segs = Array(k) { j ->
+        var sx = 0.0; var sy = 0.0; var sz = 0.0
+        for (i in a + j * h until a + (j + 1) * h) {
+            sx += gx[i]; sy += gy[i]; sz += gz[i]
+        }
+        V3(sx / h, sy / h, sz / h)
+    }
+    var acc = 0.0
+    for (j in 0 until k - 1) acc += (segs[j + 1] - segs[j]).norm()
+    return doubleArrayOf(acc / (k - 1) / Math.sqrt(2.0), h * dt)
+}
+
+/**
+ * 姿态漂移造成的位移误差上界（米）。
+ * 角速度误差 b_g 常值时：θ = b_g·t，泄漏 = g·θ，位移误差 = (1/6)·g·b_g·T³。
+ * 零偏是游走的，在 T 尺度上的不确定度由 τ 尺度的 σ 按 √(T/τ) 扩散。
+ */
+private fun attitudeDriftBudget(gMag: Double, sigmaBg: Double, tau: Double, t: Double): Double {
+    if (sigmaBg <= 0.0 || tau <= 0.0 || t <= 0.0) return 0.0
+    val sigmaT = sigmaBg * Math.sqrt(t / tau)
+    return gMag * sigmaT * t * t * t / 6.0
+}
+
 // ------------------------------------------------------------------ 姿态
 
 /**
@@ -535,22 +599,35 @@ private fun runContaining(flags: BooleanArray, i: Int, n: Int): IntArray {
  * 抵抗手机的真实旋转：持续角速率 ω 下稳态姿态误差 ≈ ω·dt/α（α=0.05、dt=9.5 ms 时
  * ≈0.19·ω），ω=5°/s 就有 1° 误差、重力泄漏 0.17 m/s²。
  * v2 换成当前**实测**加速度方向（标准 Mahony），手机转它就跟着转，没有这个稳态误差。
+ *
+ * [i0] 从第 i0 个样本才开始积分（之前的填初始姿态）。必须传校准段起点：初始姿态取自
+ * 校准段的重力方向，若从样本 0 积起、而手机在校准段之前转过（实测 143734 转了 21°），
+ * 这个初始姿态对样本 0 就是错的，而且一路带进窗口 —— 静止段残余达 3.3 m/s²。
+ *
+ * [gMag] 给了就用**模长**检验代替方向门限：方向门限会自锁 —— 误差一旦超过 GATE_RAD
+ * 就永远"跳过修正"，再也拉不回来（143734 实测 19.5° 全程没修正过一次）。
+ * 静止与否已由 flags 判定，模长检验表达的是同一件事的另一面：静止时 |acc| 就该 = |g|。
  */
 private fun solveAttitude(
     ax: DoubleArray, ay: DoubleArray, az: DoubleArray,
     gx: DoubleArray, gy: DoubleArray, gz: DoubleArray,
     bias: V3, gRef: V3, flags: BooleanArray, dt: Double,
+    i0: Int = 0, gMag: Double = 0.0,
 ): Array<Quat> {
     val n = ax.size
     val qs = Array(n + 1) { Quat.IDENTITY }
     var q = qFromTwoVectors(gRef, V3.UP)
-    qs[0] = q
-    for (i in 0 until n - 1) {
+    val start = i0.coerceIn(0, (n - 1).coerceAtLeast(0))
+    for (k in 0..start) qs[k] = q       // qs[i] 对应 acc[i]：前 i0+1 个都是初始姿态
+    for (i in start until n - 1) {
         val w = V3(gx[i] - bias.x, gy[i] - bias.y, gz[i] - bias.z)
         val qPred = q.mul(qDelta(w, dt)).normalized()
         if (flags[i]) {
             val e = qPred.rotateInv(V3.UP).cross(V3(ax[i], ay[i], az[i]).unit())
-            q = if (e.norm() > GATE_RAD) qPred
+            val good = if (gMag > 0.0)
+                abs(V3(ax[i], ay[i], az[i]).norm() - gMag) <= GATE_MAG_FRAC * gMag
+            else e.norm() <= GATE_RAD
+            q = if (!good) qPred
             else qPred.mul(qDelta(e * -ALPHA, dt)).normalized()
         } else {
             q = qPred

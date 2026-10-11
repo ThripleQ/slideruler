@@ -1,87 +1,147 @@
-"""定位实验：积分区间与锚点选择如何决定精度（判断误差的真正来源）。
+"""实验 17：窗口该多长？—— 硬真值 15 cm ×3 上的对照
 
-真值：滑动段 = 采样点 [200, 350]，位移恰好 0.8 m，v(200) = v(350) = 0。
+上一发（exp_attitude.py）修掉了姿态初始化错位（静止段残余 3.3 → 0.002 m/s²），
+但距离没变（11.64→11.78）。说明那个巨大的**常值**泄漏早被双锚点扣掉了，
+它不是主误差。真正的矛盾在窗口：
+
+  143734  窗口 0.97 s（真实运动只有 0.69 s）  裸积分 16.39  双锚点 1.59
+  143725  窗口 1.78 s                        裸积分 21.21  双锚点 15.96
+  143719  窗口 1.72 s                        裸积分  4.21  双锚点 11.71
+
+三条的末端速度分别是 0.333 / 0.133 / 0.227 m/s，**都不为 0** —— 松手那一刻
+手机还在动。双锚点的"两端速度归零"把这个真实速度当成漂移扣掉，
+143734 因此被扣掉 14.8 cm（正好是答案）。
+
+同时窗口里塞了 0.3~1.1 s 的静止段。静止段对位移零贡献，对误差却是完整加成
+（误差 ∝ ½·b·T²）—— 这是 docs/boundary-design.md §3 早就写下的硬事实。
+
+本实验对照四种窗口/定标组合：
+  A 现状     窗口 = 静止→静止，双锚点（两端强行归零）
+  B 短窗口   窗口 = 纯运动段，零偏只用**窗口外**的起点静止段估（不强行归零）
+  C 短窗口+两端零偏线性插值（若终点段速度≈0 才用）
+  D 按住窗   窗口 = 按下→松开
+
+判定标准只有一条：真值 15 cm，谁最接近。
 """
-
-import math
+import argparse
+import os
 import statistics
+import sys
 
-import pipeline as P
-from pipeline import DT, D_TRUE, Params, SensorCfg, gen_truth
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-IDEAL = dict(acc_bias=0, acc_noise=0, gyro_bias=0, gyro_noise=0, gyro_instab=0,
-             wobble_deg=0, tilt_deg=0)
-NOMINAL = dict()
-
-
-def integrate(a1, lo, hi):
-    v = [0.0]
-    p = [0.0]
-    for i in range(lo + 1, hi + 1):
-        v.append(v[-1] + (a1[i - 1] + a1[i]) / 2 * DT)
-        p.append(p[-1] + (v[-2] + v[-1]) / 2 * DT)
-    return v, p
+from pipeline import vnorm, vunit
+import measure2 as M
+from exp_real import load, ROOT
+from exp_attitude import attitude, TRUTH
 
 
-def trial(a1, lo, hi, drift=True):
-    v, p = integrate(a1, lo, hi)
-    if not drift:
-        return abs(p[-1])
-    da = v[-1] / ((hi - lo) * DT)
-    a1c = list(a1)
-    for i in range(lo + 1, hi + 1):
-        a1c[i] = a1[i] - da
-    return abs(integrate(a1c, lo, hi)[1][-1])
+def prep(nm):
+    acc, gyr, dn, up, dt = load(os.path.join(ROOT, nm))
+    m = M.measure(acc, gyr, dn, up, dt=dt, merge_mode="press",
+                  head_r=None, gate_motion=False)
+    if not m["ok"]:
+        return None
+    ca, cb = m["cal"]
+    gb2 = tuple(statistics.fmean(gyr[i][a] for i in range(ca, cb)) for a in range(3))
+    am = tuple(statistics.fmean(acc[i][a] for i in range(ca, cb)) for a in range(3))
+    qs = attitude(acc, gyr, gb2, vunit(am), m["flags"], dt, i0=ca,
+                  gate_mode="mag", g_mag=m["gMag"])
+    a = M.to_linear(acc, qs, m["gMag"])
+    return dict(acc=acc, gyr=gyr, dn=dn, up=up, dt=dt, m=m, a=a,
+                cal=(ca, cb), r0=m["run0"], r1=m["run1"])
 
 
-def build(cfg_kw, seed=7):
-    cfg = SensorCfg(**cfg_kw)
-    truth = gen_truth(cfg, seed=seed)
-    qs, _ = P.solve_attitude(truth, *P.calibrate(truth, truth["n_pre"])[:2], Params())
-    a_lin = P.remove_gravity(truth, qs)
-    u, _, _ = P.pca_axis(a_lin[201:349])
-    return truth, [sum(a_lin[i][k] * u[k] for k in range(3)) for i in range(len(a_lin))]
+def integ(a, i0, i1, dt, b=None):
+    """从 i0 积到 i1，扣除常值零偏 b。返回 (v_end, p_end)。"""
+    v = [0.0, 0.0, 0.0]
+    p = [0.0, 0.0, 0.0]
+    bb = b or (0.0, 0.0, 0.0)
+    for i in range(i0 + 1, i1 + 1):
+        vv = [v[k] + 0.5 * ((a[i - 1][k] - bb[k]) + (a[i][k] - bb[k])) * dt
+              for k in range(3)]
+        p = [p[k] + 0.5 * (v[k] + vv[k]) * dt for k in range(3)]
+        v = vv
+    return vnorm(v), vnorm(p)
 
 
-def show(label, d):
-    print(f"  {label:<40} {d * 100:7.2f} cm   误差 {(d - D_TRUE) / D_TRUE * 100:+7.2f}%")
+def bias_from(a, runs):
+    idx = [i for r in runs for i in range(*r)]
+    return tuple(statistics.fmean(a[i][k] for i in idx) for k in range(3))
 
 
-def block(title, kw):
-    print("=" * 100)
-    print(title)
-    print("=" * 100)
-    truth, a1 = build(kw)
-    show("真值窗口 [200,350]", trial(a1, 200, 350))
-    show("检出窗口 [200,378]（滑窗检测延迟 0.28s）", trial(a1, 200, 378))
-    show("记录起点→检出终点 [0,378]", trial(a1, 0, 378))
-    print()
+def variants(d):
+    a, dt, m = d["a"], d["dt"], d["m"]
+    w0, w1 = m["window"]
+    mo0, mo1 = m["motion"]
+    r0, r1 = m["run0"], m["run1"]
+    out = {}
 
-    print(f"  {'起点偏移(终点固定350)':<26}{'距离':>10}{'误差':>10}")
-    for k in [0, 1, 2, 5, 10, 30]:
-        d = trial(a1, 200 + k, 350)
-        print(f"  晚 {k:>2} 采样 = {k * DT * 1000:>4.0f} ms{'':<6}{d * 100:>10.2f}"
-              f"{(d - D_TRUE) / D_TRUE * 100:>9.2f}%")
-    print()
-    print(f"  {'终点偏移(起点固定200)':<26}{'距离':>10}{'误差':>10}")
-    for k in [0, 1, 2, 5, 10, 30]:
-        d = trial(a1, 200, 350 + k)
-        print(f"  晚 {k:>2} 采样 = {k * DT * 1000:>4.0f} ms{'':<6}{d * 100:>10.2f}"
-              f"{(d - D_TRUE) / D_TRUE * 100:>9.2f}%")
-    print()
+    # A 现状：双锚点
+    out["A 现状双锚点"] = m["distanceM"] * 100
+
+    # B 短窗口 + 起点静止段定零偏
+    b0 = bias_from(a, [r0])
+    _, pB = integ(a, mo0, mo1, dt, b0)
+    out["B 短窗口+起锚"] = pB * 100
+
+    # C 短窗口 + 两端零偏线性插值（零偏随时间线性漂移）
+    b1 = bias_from(a, [r1])
+    t0 = statistics.fmean(range(*r0)) * dt
+    t1 = statistics.fmean(range(*r1)) * dt
+    tm = statistics.fmean(range(mo0, mo1)) * dt
+    if abs(t1 - t0) > 1e-9:
+        f = (tm - t0) / (t1 - t0)
+        bC = tuple(b0[k] + f * (b1[k] - b0[k]) for k in range(3))
+    else:
+        bC = b0
+    _, pC = integ(a, mo0, mo1, dt, bC)
+    out["C 短窗口+插值"] = pC * 100
+
+    # D 按住窗 + 起点零偏
+    _, pD = integ(a, d["dn"], d["up"], dt, b0)
+    out["D 按住窗"] = pD * 100
+
+    # 诊断量
+    vB, _ = integ(a, mo0, mo1, dt, b0)
+    diag = dict(窗口T=m["T"], 运动T=(mo1 - mo0) * dt, 末端速度=vB,
+                零偏=vnorm(b0), 末端零偏=vnorm(b1))
+    return out, diag
 
 
 def main():
-    block("实验组 1：理想传感器 + 真值姿态 + 理想主轴（隔离一切传感器误差）", IDEAL)
-    block("实验组 2：标称误差全开（零偏/噪声/手部转动，姿态用滤波器估计）", NOMINAL)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--names", default=",".join(TRUTH))
+    a = ap.parse_args()
+    names = a.names.split(",")
 
-    print("=" * 100)
-    print("实验组 3：起点晚了半个窗长时，各误差源各自的贡献（终点固定 350）")
-    print("=" * 100)
-    for name, kw in [("理想传感器", IDEAL), ("标称传感器", NOMINAL)]:
-        truth, a1 = build(kw)
-        show(f"{name}，起点 200", trial(a1, 200, 350))
-        show(f"{name}，起点 215（晚 150 ms）", trial(a1, 215, 350))
+    keys = None
+    rows = []
+    for nm in names:
+        d = prep(nm)
+        if d is None:
+            print(nm, "拒答"); continue
+        out, diag = variants(d)
+        keys = list(out)
+        rows.append((nm, TRUTH.get(nm), out, diag))
+
+    print("%-16s %5s | %s" % ("采集", "真值",
+          "  ".join("%14s" % k for k in keys)))
+    print("-" * (24 + 16 * len(keys)))
+    for nm, t, out, diag in rows:
+        print("%-16s %5.1f | %s" % (nm, t or -1,
+              "  ".join("%14.2f" % out[k] for k in keys)))
+        print("      %-18s 窗口%.2fs 运动%.2fs 末端v%.3f |b0|=%.3f |b1|=%.3f"
+              % ("", diag["窗口T"], diag["运动T"], diag["末端速度"],
+                 diag["零偏"], diag["末端零偏"]))
+
+    print("-" * (24 + 16 * len(keys)))
+    for k in keys:
+        errs = [(r[2][k] - r[1]) / r[1] * 100 for r in rows if r[1]]
+        if errs:
+            print("%-16s 相对误差 %s  平均 %+.2f%%  最大 |%.2f%%|"
+                  % (k, "  ".join("%+.1f%%" % e for e in errs),
+                     statistics.fmean(errs), max(abs(e) for e in errs)))
 
 
 if __name__ == "__main__":

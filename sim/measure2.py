@@ -50,7 +50,12 @@ GAP_S = 0.15             # 两段运动之间隔这么久以内的静止，算�
 # "overlap" = 取与按钮窗重叠最多的那一段（v2 行为，会切碎滑动、且惩罚滑过松手时刻的段）
 MERGE_MODE = "press"
 ALPHA = 0.05             # 互补滤波系数
-GATE_RAD = 0.30          # 加速度修正的门限（预测/实测重力方向夹角）
+GATE_RAD = 0.30          # 加速度修正的门限（预测/实测重力方向夹角）—— 仅 g_mag 未知时用
+GATE_MAG_FRAC = 0.25     # 加速度修正的门限：|acc| 偏离 |g| 超过这个比例就不修正。
+#   为什么换成模长检验：方向门限会**自锁**。20261011_143734 实测，姿态误差从
+#   一开始就有 19.5°（|e|=0.335 > 0.30），于是全程"跳过修正"，误差再也拉不回来。
+#   门限本意是"别拿运动加速度当重力"，但静止与否已由 flags 判定；
+#   模长检验更能表达同一件事：静止时 |acc| 就该等于 |g|，与方向无关。
 PLATEAU_GRID = 5         # 平台宽度扫描的点数
 QUAD = False             # 残差加速度是否允许线性漂移（见 zupt_two_anchor 的说明）
 # 「修正量相对答案」的上限：|裸积分 − 去趋势| 超过 max(答案, 该下限) 就报"模型敏感"。
@@ -141,8 +146,14 @@ def runs_of(flags, want, min_len):
 # ------------------------------------------------------------------ 姿态
 
 def solve_attitude_v2(acc, gyr, gb, g_ref_body, flags, dt, alpha=ALPHA, gate=GATE_RAD,
-                      use_flags=None):
+                      use_flags=None, i0=0, g_mag=None):
     """互补滤波。**加速度修正在静止段才开**，运动中纯陀螺外推。
+
+    i0    从第 i0 个样本才开始积分（之前的填初始姿态）。
+          必须传校准段起点：初始姿态取自校准段的重力方向，若从样本 0 积起，
+          而手机在校准段之前转过（实测 143734 转了 21°），这个初始姿态对
+          样本 0 就是错的，而且会一路带进窗口 —— 静止段残余达 3.3 m/s²。
+    g_mag 给了就用模长检验代替方向门限（见 GATE_MAG_FRAC 的说明）。
 
     use_flags：姿态修正的门控（默认 = flags）。两者可以不同 —— 这正是 v4 的关键改动：
       flags     问的是「这段能不能当 ZUPT 锚点」（要保守，宁缺毋滥）
@@ -160,16 +171,22 @@ def solve_attitude_v2(acc, gyr, gb, g_ref_body, flags, dt, alpha=ALPHA, gate=GAT
     """
     ok = flags if use_flags is None else use_flags
     q = q_from_two_vectors(g_ref_body, (0.0, 0.0, 1.0))
-    qs = [q]
-    for i in range(len(acc) - 1):
+    # qs[i] 必须对应 acc[i]，所以前 i0+1 个都是初始姿态（acc[i0] 时刻的姿态就是它）
+    i0 = max(0, min(i0, max(0, len(acc) - 1)))
+    qs = [q] * (i0 + 1)
+    for i in range(i0, len(acc) - 1):
         q_pred = qnorm(qmul(q, q_delta(vsub(gyr[i], gb), dt)))
         if ok[i]:
             e = vcross(qrotT(q_pred, (0.0, 0.0, 1.0)), vunit(acc[i]))
-            q = (q_pred if vnorm(e) > gate
+            good = (abs(vnorm(acc[i]) - g_mag) <= GATE_MAG_FRAC * g_mag
+                    if g_mag else vnorm(e) <= gate)
+            q = (q_pred if not good
                  else qnorm(qmul(q_pred, q_delta(vscale(e, -alpha), dt))))
         else:
             q = q_pred
         qs.append(q)
+    while len(qs) < len(acc):
+        qs.append(qs[-1] if qs else q)
     return qs
 
 
@@ -261,6 +278,42 @@ def zupt_two_anchor(a_lin, w0, w1, run0, run1, dt, quad=False):
     spread0 = statistics.pstdev([vnorm(vc[i - w0]) for i in range(*run0)])
     return dist, vc, p, anchor_drift, max(spread0, statistics.pstdev(
         [vnorm(vc[i - w0]) for i in range(*run1)]))
+
+
+def gyro_bias_instability(gyr, run, dt):
+    """静止段内估计陀螺零偏**不稳定性**（不是零偏本身）。
+
+    零偏的常值部分能被校准段平均掉；抹不掉的是它在测量时长内的游走，
+    而那正是姿态漂移 → 重力泄漏的源头。做法：把静止段切成 4 段，
+    相邻段均值之差的模长 /√2 就是该时长尺度上零偏变化的 σ。
+
+    返回 (σ rad/s, τ s)；τ 是估计所依据的时间尺度，外推到其他时长用 √(T/τ)。
+    """
+    a, b = run
+    n = b - a
+    if n < 16:
+        return None, None
+    h = max(4, n // 4)
+    k = n // h
+    if k < 2:
+        return None, None
+    segs = [tuple(statistics.fmean(gyr[i][x] for i in range(a + j * h, a + (j + 1) * h))
+                  for x in range(3)) for j in range(k)]
+    d = [vnorm(vsub(segs[j], segs[j + 1])) for j in range(k - 1)]
+    return statistics.fmean(d) / math.sqrt(2.0), h * dt
+
+
+def attitude_drift_budget(g_mag, sigma_bg, tau, T):
+    """姿态漂移造成的位移误差上界（米）。
+
+    角速度误差 b_g 常值时：θ = b_g·t，泄漏 = g·θ，位移误差 = (1/6)·g·b_g·T³。
+    零偏是游走的，在 T 尺度上的不确定度由 τ 尺度的 σ 按 √(T/τ) 扩散。
+    **∝ T³** —— 这是本项目最强的杠杆：滑动时间减半，误差降到 1/8。
+    """
+    if not sigma_bg or not tau or T <= 0:
+        return 0.0
+    sigma_T = sigma_bg * math.sqrt(T / tau)
+    return (1.0 / 6.0) * g_mag * sigma_T * T ** 3
 
 
 def principal_dir(pts, iters=60):
@@ -513,7 +566,8 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
     # 这条只影响姿态，不影响锚点搜索 —— 锚点仍然用原始终止判据找。
     gate_flags = ([flags[i] and not (down_i <= i <= up_i) for i in range(n)]
                   if gate_motion else flags)
-    qs = solve_attitude_v2(acc, gyr, gb2, g_ref, flags, dt, use_flags=gate_flags)
+    qs = solve_attitude_v2(acc, gyr, gb2, g_ref, flags, dt, use_flags=gate_flags,
+                           i0=ca, g_mag=g_mag)
     a_lin = to_linear(acc, qs, g_mag)
 
     # ---- 6. 双锚点 ZUPT ----
@@ -566,6 +620,15 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
     model_gap = abs(bare_head - dist_head)
     model_sensitive = model_gap > max(dist_head, MODEL_GAP_FLOOR_M)
 
+    # ---- 6c. 姿态漂移的误差上界 ∝ T³ ----
+    # 这是本项目最强的杠杆，也是"对操作要求高"的物理根源：陀螺零偏的**游走**
+    # 抹不掉，它在运动段里变成姿态漂移，再变成重力泄漏，位移误差 ∝ T³。
+    # 实测三条硬真值（15 cm）：T=0.69 s → 上界 6 cm；T=1.44 s → 25 cm；
+    # T=1.49 s → 37 cm。滑动时间减半，误差降到 1/8 —— 比任何算法微调都管用。
+    gyr_inst, gyr_tau = gyro_bias_instability(gyr, run0, dt)
+    t_win = (w1 - w0) * dt
+    att_budget = attitude_drift_budget(g_mag, gyr_inst, gyr_tau, t_win)
+
     # ---- 7. 平台宽度：窗口端点在静止段内挪动，答案变化多少 ----
     grid0, grid1 = [], []
     for k in range(PLATEAU_GRID):
@@ -607,7 +670,11 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
            "pImuVec": tuple(p[-1]), "q0": qs[w0], "q1": qs[w1],
            "dRr": tuple(d_lever),
            "axisDistM": dist_axis, "axis": e,
-           "straightness": straightness, "straightRms": straight_rms}
+           "straightness": straightness, "straightRms": straight_rms,
+           # 姿态漂移预算（∝T³）与它的输入。只作诊断与操作引导，不据此拒答 ——
+           # 它是保守上界（假设游走全朝一个方向、且双锚点一点没扣），实测误差通常小得多。
+           "gyroInstability": gyr_inst, "gyroInstTauS": gyr_tau,
+           "attBudgetM": att_budget}
     warns = []
     if end_hit_bound:
         warns.append("松手后手机在 %0.1f s 内没有停稳（运动一直延续到数据末尾）" % tail_s)
