@@ -8,6 +8,7 @@
   C. 打印按钮窗两端的速度 —— 松手时速度未归零 = 没停稳就松手。
 """
 
+import math
 import os
 import statistics
 import sys
@@ -43,12 +44,17 @@ def prepare(d):
     p = Params(static_mode="adaptive", assumed_dt=dt)
     truth = {"N": n - 1, "acc": acc, "gyr": gyr, "dt": dt, "n_pre": lo, "n_mot": hi - lo}
     qs, _ = P.solve_attitude(truth, prof.gyro_bias, prof.gravity_ref, p, dt=dt)
-    a_lin = P.remove_gravity(truth, qs, g_mag=G)
+    # 必须用本机实测重力模长（K40 = 9.91），写死 9.81 会留下 0.10 m/s² 的静差 = 噪声地板的 12 倍
+    a_lin = P.remove_gravity(truth, qs, g_mag=prof.gravity_mag)
+    cal_range = range(cal_lo, lo)
+    b_vec = tuple(statistics.fmean(a_lin[i][a] for i in cal_range) for a in range(3))
     return dict(acc=acc, gyr=gyr, a_lin=a_lin, dt=dt, lo=lo, hi=hi, n=n,
-                marks=marks, prof=prof, p=p, truth=truth, t0=t0, acc_ts=acc_ts)
+                marks=marks, prof=prof, p=p, truth=truth, t0=t0, acc_ts=acc_ts,
+                bias_bound=math.sqrt(sum(x * x for x in b_vec)))
 
 
 def axis_and_a1(st):
+    """仅用于诊断：PCA 主轴与一维投影（旧算法走的这条路）。"""
     a_lin, lo, hi = st["a_lin"], st["lo"], st["hi"]
     u, lam1, lam2 = P.pca_axis(a_lin[lo:hi + 1])
     axis = u if vdot(u, (1.0, 0.0, 0.0)) >= 0 else vscale(u, -1.0)
@@ -56,13 +62,20 @@ def axis_and_a1(st):
     return a1, (lam1 / lam2 if lam2 > 0 else float("inf"))
 
 
-def dist_of(a1, lo, hi, dt):
-    v_raw, p_raw = P.integrate(a1, lo, hi, dt=dt)
-    T = (hi - lo) * dt
-    da = v_raw[-1] / T if T > 1e-9 else 0.0
-    a1c = [a1[i] - da if lo <= i <= hi else a1[i] for i in range(len(a1))]
-    _, p_z = P.integrate(a1c, lo, hi, dt=dt)
-    return abs(p_z[-1]), v_raw[-1]
+def dist_of(st, lo, hi):
+    """与 slide_pipeline 同款的出口：三维净位移矢量 + 条件矢量 ZUPT。
+
+    返回 (距离 m, 前向终点速度, 是否去趋势, 阈值, 三维裸积分 m, 主轴夹角°)。
+    """
+    a_lin, dt = st["a_lin"], st["dt"]
+    dist, v_end, used, thr = P.integrate_cond_zupt3d(
+        a_lin, lo, hi, dt, bias_bound=st["bias_bound"], sigma=st["prof"].acc_sigma, k_sigma=5.0)
+    _, p3 = P.integrate_vec(a_lin, lo, hi, dt=dt)
+    raw = math.sqrt(sum(x * x for x in p3[-1]))
+    u, _, _ = P.pca_axis(a_lin[lo:hi + 1])
+    d = vunit(p3[-1]) if raw > 1e-9 else (0.0, 0.0, 0.0)
+    ang = math.degrees(math.acos(max(-1.0, min(1.0, abs(vdot(u, d))))))
+    return dist, v_end, used, thr, raw, ang
 
 
 def main():
@@ -76,9 +89,11 @@ def main():
     print(f"窗口扫描  {os.path.basename(d)}   dt={dt*1000:.4f}ms  DOWN=#{lo}  UP=#{hi}  λ1/λ2={lr:.1f}")
     print("=" * 96)
 
-    d0, v0 = dist_of(a1, lo, hi, dt)
-    print(f"按钮窗 [{lo},{hi}] = {d0*100:.2f} cm    窗口终点原始速度 v_end = {v0:+.4f} m/s "
-          f"({'✓ 已停稳' if abs(v0) < 0.05 else '✗ 松手时还在动'})")
+    d0, v0, used0, thr0, raw0, ang0 = dist_of(st, lo, hi)
+    print(f"按钮窗 [{lo},{hi}] = {d0*100:.2f} cm   三维裸积分 {raw0*100:.2f} cm   "
+          f"前向 v_end = {v0:+.4f} m/s ({'✓ 已停稳' if abs(v0) < thr0 else '✗ 松手时还在动'})")
+    print(f"          PCA 主轴与净位移方向夹角 {ang0:.1f}° "
+          f"→ 若走旧的一维投影，自带 cos{ang0:.0f}° = {math.cos(math.radians(ang0)):.3f} 的损失")
 
     # ---- A. 端点扫描 ----
     starts = sorted(set([max(0, lo - 200), max(0, lo - 100), lo, lo + 60, lo + 120, lo + 240]))
@@ -92,7 +107,7 @@ def main():
             if e <= s + 3:
                 row.append("   --  ")
             else:
-                val, _ = dist_of(a1, s, e, dt)
+                val, _, _, _, _, _ = dist_of(st, s, e)
                 row.append(f"{val*100:8.2f}")
         tag = "  ←DOWN" if s == lo else ""
         print(f"  {s:<5}" + "".join(row) + tag)
@@ -126,7 +141,7 @@ def main():
     if dlo is None:
         print("C · 静止检测器：没找到运动段")
     else:
-        dd, _ = dist_of(a1, dlo, dhi, dt)
+        dd, _, _, _, _, _ = dist_of(st, dlo, dhi)
         print(f"C · 静止检测器窗 [{dlo},{dhi}] = {dd*100:.2f} cm   （按钮窗 [{lo},{hi}] = {d0*100:.2f} cm）")
     print()
 

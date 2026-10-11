@@ -28,6 +28,13 @@ CAPTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 AUDIT_HALF_S = 0.3      # 审计窗半径
 CAL_MAX_S = 2.0         # 校准窗上限
+K_SIGMA = 5.0           # 条件 ZUPT 阈值系数：thr = |b|·T + K·σ_a·√(T·dt)
+                        #   取 5 而不是 3 —— 松手判据本身要「宁可不动手」：
+                        #   漏触发只是留着零偏那点小误差，误触发会凭空砍掉一段真位移。
+                        #   实测：k=3 时 091811 的判定余量只有 3%（0.0124 vs 0.0121），
+                        #   等于一个随机开关；k=5 后余量 19%，判定稳。
+MAX_EXT_S = 1.2         # 松手时还在动 → 最多往后找 1.2 s 的停稳点
+DWELL_S = 0.05          # 「停稳」需要持续多久才算数
 
 
 # --------------------------------------------------------------------------
@@ -168,34 +175,56 @@ def analyse(d):
           f"（b·T 决定条件 ZUPT 的阈值）")
 
     def distance(lo_i, hi_i):
-        """返回 (距离, 裸积分, v_end, 阈值, 是否去趋势, λ1/λ2)"""
+        """返回 (距离, 裸积分, v_end前向, 阈值, 是否去趋势, 主轴夹角°)"""
+        dist, v_end, used, thr = P.integrate_cond_zupt3d(
+            a_lin, lo_i, hi_i, dt, bias_bound=bias_bound, sigma=sigma_a, k_sigma=K_SIGMA)
+        # 参照量：三维裸积分（未去趋势、未做尺度修正）
+        _, p3 = P.integrate_vec(a_lin, lo_i, hi_i, dt=dt)
+        raw = math.sqrt(sum(x * x for x in p3[-1]))
+        # 诊断：PCA 主轴 vs 真实净位移方向的夹角（旧算法的损失来源）
         u, lam1, lam2 = P.pca_axis(a_lin[lo_i:hi_i + 1])
-        axis = u if vdot(u, (1.0, 0.0, 0.0)) >= 0 else vscale(u, -1.0)
-        a1 = [vdot(a_lin[i], axis) for i in range(len(a_lin))]
-        _, p_raw = P.integrate(a1, lo_i, hi_i, dt=dt)
-        # 残余零偏投影到主轴（1D）
-        b1 = statistics.fmean(a1[i] for i in cal_range)
-        dist, v_end, used, thr = P.integrate_cond_zupt(
-            a1, lo_i, hi_i, dt, bias_bound=abs(b1), sigma=sigma_a)
-        return dist, abs(p_raw[-1]), v_end, thr, used, (lam1 / lam2 if lam2 > 0 else float("inf"))
+        d = vunit(p3[-1]) if raw > 1e-9 else (0.0, 0.0, 0.0)
+        ang = math.degrees(math.acos(max(-1.0, min(1.0, abs(vdot(u, d))))))
+        return dist, raw, v_end, thr, used, ang
+
+    def rest_extension(lo_i, hi_i, thr_i):
+        """松手时手机还在动 → 顺延到真正停稳那一刻（见 pipeline.stop_endpoint）。"""
+        return P.stop_endpoint(a_lin, lo_i, hi_i, dt=dt, thr=thr_i,
+                               max_ext_s=MAX_EXT_S, dwell_s=DWELL_S)
 
     print()
-    print("5 · 距离（条件 ZUPT：只有 |v_end| 大到零偏解释不了时才去趋势）")
+    print("5 · 距离（三维净位移矢量 + 条件矢量 ZUPT，k=%.1f）" % K_SIGMA)
     if hi is not None and hi > lo + 5:
-        dist, raw, v_end, thr, used, lr = distance(lo, hi)
-        T = (hi - lo) * dt
-        print(f"  按钮窗口  [{lo}, {hi}]  时长 {T:.2f} s")
-        print(f"    λ1/λ2 = {lr:.1f}    终点速度 v_end = {v_end:+.4f} m/s    阈值 = {thr:.4f} m/s"
-              f"    → {'去趋势' if used else '裸积分'}")
-        print(f"    ★ 距离 = {dist*100:.2f} cm      （裸积分 {raw*100:.2f} cm）")
-        if used:
-            print(f"      去趋势扣掉 {abs(raw-dist)*100:.2f} cm（小 v_end 时≈|v_end|·T/2={abs(v_end)*T/2*100:.2f} cm）")
+        # 先量到松手点，看终点速度是否大到"已经停稳"解释不了
+        _, _, v0f, thr0, used0, _ = distance(lo, hi)
+        end = hi
+        if abs(v0f) > thr0:
+            end = rest_extension(lo, hi, thr0)
+            if end != hi:
+                print(f"  ⚠ 松手时手机还在动（v_end {v0f:+.4f} > 阈值 {thr0:.4f}）"
+                      f" → 终点顺延 #{hi} → #{end}（+{(end-hi)*dt*1000:.0f} ms）")
+            else:
+                print(f"  ⚠ 松手时手机还在动（v_end {v0f:+.4f} > 阈值 {thr0:.4f}），"
+                      f"但 1.2 s 内没等到停稳 → 终点仍取松手点")
+        dist, raw, v_end, thr, used, ang = distance(lo, end)
+        T = (end - lo) * dt
+        print(f"  窗口  [{lo}, {end}]  时长 {T:.2f} s")
+        print(f"    前向终点速度 v_end = {v_end:+.4f} m/s    阈值 = {thr:.4f} m/s"
+              f"    → {'矢量去趋势' if used else '裸积分'}")
+        print(f"    PCA 主轴与净位移方向夹角 = {ang:.1f}°"
+              f"（旧的一维投影在这里自带 cos{ang:.0f}° = {math.cos(math.radians(ang)):.3f} 的损失）")
+        print(f"    ★ 距离 = {dist*100:.2f} cm      （三维裸积分 {raw*100:.2f} cm）")
+        if end != hi:
+            dh, _, vh, _, _, _ = distance(lo, hi)
+            print(f"      若止于松手点 #{hi}：{dh*100:.2f} cm（差 {(dist-dh)*100:+.2f} cm）")
         # 把窗口两端各外扩 200ms，验证「余量无关性」
+        # 终点只往后扩到「再往前 200ms 是否仍停得住」，所以这里用 end 作为基准
         m = int(0.2 / dt)
-        lo2, hi2 = max(0, lo - m), min(len(a_lin) - 1, hi + m)
+        lo2, hi2 = max(0, lo - m), min(len(a_lin) - 1, end + m)
         d2, raw2, v2, thr2, u2, _ = distance(lo2, hi2)
+        tip = "" if abs(v2) <= thr2 else "（该扩法已越过停稳点，仅作参考）"
         print(f"    外扩 200ms [{lo2}, {hi2}]  {d2*100:.2f} cm   "
-              f"→ 与上者差 {abs(d2-dist)*1000:.2f} mm（应 ≈0）")
+              f"→ 与上者差 {abs(d2-dist)*1000:.2f} mm {tip}")
     else:
         print("  没有可用的 UP 边界")
 

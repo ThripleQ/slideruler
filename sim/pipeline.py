@@ -507,6 +507,115 @@ def integrate(acc1, lo, hi, dt=DT):
     return v, p
 
 
+def integrate_vec(a_lin, lo, hi, dt=DT):
+    """三维矢量的梯形二次积分，返回 (v[k], p[k])，k = 0..hi-lo，每个是三元 list。"""
+    m = hi - lo
+    v = [[0.0, 0.0, 0.0] for _ in range(m + 1)]
+    p = [[0.0, 0.0, 0.0] for _ in range(m + 1)]
+    for k in range(1, m + 1):
+        i = lo + k
+        for x in range(3):
+            v[k][x] = v[k - 1][x] + (a_lin[i - 1][x] + a_lin[i][x]) / 2.0 * dt
+            p[k][x] = p[k - 1][x] + (v[k - 1][x] + v[k][x]) / 2.0 * dt
+    return v, p
+
+
+def stop_endpoint(a_lin, lo, hi, dt=DT, thr=0.0, max_ext_s=1.2, dwell_s=0.05):
+    """把窗口终点从「松手点 hi」顺延到「手机真正停稳那一刻」。
+
+    只在**松手时手机还在动**（前向终点速度 |v_fwd| > thr）时才该调用 —— 判据和
+    条件 ZUPT 共用同一个 thr，所以"要不要去趋势"和"要不要顺延"永远一致：
+      |v_end| ≤ thr → 手机已停稳 → 终点就是松手点，且不必去趋势；
+      |v_end| > thr → 手机还在动 → 终点顺延到停稳处，此时 v_end 自然回到 0。
+
+    为什么不能用「速度过零」找停稳点：从 hi 起积分速度天生为 0，判据是瞎的。
+    这里的速度一律从 lo（按下点）积分，才是绝对速度。
+
+    做法：
+      1. 找第一个「|v_fwd| ≤ thr 且持续 dwell_s」的样本 → 停稳区的起点 k_stop；
+      2. 从 k_stop 往后扩到 |v_fwd| 重新超阈为止 → 停稳区终点 k_end；
+      3. 终点取 [hi, k_end] 内**前向位移最大**的那一帧。
+         手机停住后可能原地不动（位移平台），也可能被手拉回去（折返）——
+         两种情况「位移见顶」都指向同一个正确的终点。
+
+    真实案例 20261011_091811：松手时 v_fwd = +2.0 cm/s（阈值 1.56 cm/s），
+    松手后 228 ms 位移见顶 15.62 cm，随后被拉回到 10.60 cm。
+    直接量松手点 = 13.72 cm（−12%）；顺延到见顶处 = 15.63 cm（+4%）。
+
+    返回新的终点下标；找不到合法停稳区就原样返回 hi。
+    """
+    lim = min(len(a_lin) - 1, hi + int(max_ext_s / dt))
+    if lim - hi < 5:
+        return hi
+    v, p = integrate_vec(a_lin, lo, lim, dt=dt)
+    k_hi = hi - lo
+    u = vunit(vsub(p[k_hi], p[0]))                  # 按下点 → 松手点 的净位移方向
+    fv = [vdot(v[k], u) for k in range(len(v))]
+    fp = [vdot(p[k], u) for k in range(len(p))]
+    dwell = max(2, int(dwell_s / dt))
+    k_stop = None
+    for k in range(k_hi + 1, len(fv)):
+        if all(abs(fv[j]) <= thr for j in range(k, min(len(fv), k + dwell))):
+            k_stop = k
+            break
+    if k_stop is None:
+        return hi
+    k_end = k_stop
+    for k in range(k_stop, len(fv)):
+        if abs(fv[k]) <= thr:
+            k_end = k
+        else:
+            break
+    if k_end - k_stop < dwell:
+        return hi                                   # 没有真正停住的一段
+    best = max(range(k_hi, k_end + 1), key=lambda k: fp[k])
+    return lo + best if best > k_hi else hi
+
+
+def integrate_cond_zupt3d(a_lin, lo, hi, dt=DT, bias_bound=0.0, sigma=0.0,
+                          k_sigma=5.0, g_scale=1.0):
+    """**三维净位移矢量模** + 条件矢量 ZUPT。这是真机测距的正确出口。
+
+    为什么要丢掉「PCA 主轴 + 一维投影」：
+      一维投影取的是**加速度方差最大**的方向，而我们要的是**净位移**的方向。
+      两者只有在轨迹是完美直线、且加速度噪声各向同性时才重合。真机上差得很远：
+        20261011_091811：PCA 轴与净位移方向夹角 **24°** → 投影自带 cos24° = 0.914
+                          → 15.61 cm 被投影成 14.3 cm，凭空丢掉 8.6%。
+        20261011_090006：夹角 15° → 丢 3.4%。
+      净位移矢量 `|∫∫ a_lin dt²|` 在定义上就等于「起点到终点」的直线距离，
+      不需要估计任何主轴，因此那一项损失直接为零。
+
+    例外：若轨迹中途折返（手机推到头又拉回来），|净位移| < 实际路程。
+    所以窗口终点必须取在**折返点之前**（见 slide_pipeline 的窗口选择）。
+
+    条件矢量 ZUPT 与一维版同构，但判据用「沿前进方向的终点速度」而不是三维模长 ——
+    三维模长里混着旋转/侧向的伪速度，会把阈值轻易顶穿，误触发去趋势。
+    去趋势时三轴各自扣掉自己的线性漂移（矢量 ZUPT）。
+
+    g_scale：加速度计增益修正。本机静止段实测 ‖f‖ = k·g，去重力用的是实测 ‖g‖，
+    所以 a_lin = k·a_true（推导见 docs），净位移整体偏 k 倍；k>1 时按 1/k 除回去。
+    传 1.0 = 不修正。
+
+    返回 (距离 m, v_end_forward, 是否去趋势, thr)。
+    """
+    m = hi - lo
+    v, p = integrate_vec(a_lin, lo, hi, dt=dt)
+    T = m * dt
+    # 前进方向 = |v| 最大处的速度方向（此时最干净，不被终点抖动污染）
+    kpk = max(range(1, m + 1), key=lambda k: vnorm(v[k]))
+    u = vunit(v[kpk])
+    v_end_fwd = vdot(v[m], u)
+    thr = bias_bound * T + k_sigma * sigma * math.sqrt(max(T * dt, 0.0))
+    used = abs(v_end_fwd) > thr
+    if not used:
+        return math.sqrt(sum(x * x for x in p[m])) / g_scale, v_end_fwd, False, thr
+    # 矢量去趋势：三轴各扣掉自己的线性漂移
+    dr = [v[m][x] / T for x in range(3)] if T > 1e-9 else [0.0, 0.0, 0.0]
+    a2 = [[a_lin[i][x] - dr[x] for x in range(3)] for i in range(lo, hi + 1)]
+    _, p2 = integrate_vec(a2, 0, m, dt=dt)
+    return math.sqrt(sum(x * x for x in p2[m])) / g_scale, v_end_fwd, True, thr
+
+
 def run_pipeline(truth, cfg, p, seed=0):
     # ---- 阶段二：自校准（只用起始静止段，免用户）----
     prof = build_profile(truth, p)
