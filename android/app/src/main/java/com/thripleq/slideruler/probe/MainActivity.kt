@@ -32,6 +32,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -98,6 +99,17 @@ data class UiState(
     val error: String? = null,
     // ---- 滑动测量（按住式边界）----
     val slideMode: Boolean = false,
+    /**
+     * 点按切换式：点一下记边界起点，再点一下记终点（不用一直按着屏幕）。
+     *
+     * 动机是操作 —— "手指按住屏幕跟着手机推"这个姿势本身就别扭，而且推完
+     * **抬手指那一下**会给手机一个扰动，正好落在终点锚点段上。
+     * 点按式下推手机的手可以完全不碰屏幕，另一只手推完按住手机停稳，
+     * 再腾出手点第二下 —— 点击那一刻手机是真的静止。
+     *
+     * 区间语义与按住式**完全一样**（两个触摸时刻之间），所以引擎侧不变。
+     */
+    val tapMode: Boolean = false,
     val pressed: Boolean = false,
     /** 已松手、正在补采尾部静止段。这 1.5 s 里别动手机，算法要靠它定终点。 */
     val slideTail: Boolean = false,
@@ -223,6 +235,8 @@ class MainActivity : ComponentActivity() {
                         onSlideEnter = { enterSlide() },
                         onSlideDown = { e, u, n -> slideDown(e, u, n) },
                         onSlideUp = { e, u, n -> slideUp(e, u, n) },
+                        onSlideTap = { e, u, n -> slideTap(e, u, n) },
+                        onTapModeChange = { v -> ui = ui.copy(tapMode = v) },
                         onSlideExit = { exitSlide() },
                     )
                 }
@@ -307,7 +321,8 @@ class MainActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         ui = ui.copy(
             recording = true, slideMode = true, pressed = false, slideTail = false, slideMarks = 0,
-            mode = "滑动测量（按住式）", totalS = 0, remainS = 0,
+            mode = if (ui.tapMode) "滑动测量（点按式）" else "滑动测量（按住式）",
+            totalS = 0, remainS = 0,
             report = null, savedDir = null, error = null,
             slideDistanceCm = null, slideVerdict = null, slideDetail = null,
         )
@@ -333,6 +348,33 @@ class MainActivity : ComponentActivity() {
         ui = ui.copy(pressed = false, slideTail = true, slideMarks = marks.size)
         // 收尾不设固定时长：交给 ticker —— 连续静止 SLIDE_SETTLE_DWELL_MS 就收工，
         // 最迟 SLIDE_SETTLE_MAX_MS。v2 引擎要靠这段静止当终点锚点。
+    }
+
+    /**
+     * 点按切换式的一次点击。语义与 [slideDown] + [slideUp] 完全等价：
+     * 第一次点击记起点，第二次点击记终点 —— 引擎拿到的还是一对 (DOWN, UP) 时刻。
+     *
+     * 只记**点击落下**的时刻（`down.uptimeMillis`），不记抬起：用户说"现在开始 / 现在结束"
+     * 指的是手指碰到屏幕那一瞬，而一次点击的按下与抬起只差几十毫秒、抬起的时刻更难对准。
+     */
+    private fun slideTap(eventMs: Long, recvUptimeMs: Long, recvElapsedNs: Long) {
+        if (!ui.slideMode || slidePending) return
+        val started = marks.any { it.name == "DOWN" }
+        val ended = marks.any { it.name == "UP" }
+        when {
+            !started && !ended -> {
+                marks.add(TouchMark("DOWN", eventMs, recvUptimeMs, recvElapsedNs))
+                ui = ui.copy(pressed = true, slideMarks = marks.size)
+            }
+            started && !ended -> {
+                marks.add(TouchMark("UP", eventMs, recvUptimeMs, recvElapsedNs))
+                slidePending = true
+                settleSinceMs = 0
+                upAtMs = SystemClock.elapsedRealtime()
+                ui = ui.copy(pressed = false, slideTail = true, slideMarks = marks.size)
+            }
+            else -> Unit // 已有完整的一对边界，等保存
+        }
     }
 
     private fun finishSlide() {
@@ -436,7 +478,7 @@ class MainActivity : ComponentActivity() {
         if (r.noMotion) {
             return String.format(
                 Locale.US,
-                "按住 %.2f s，但窗口内没有任何运动（0.2 s 尺度 %s / 0.8 s 尺度 %.4f，阈值 %.4f）\n" +
+                "边界跨度 %.2f s，但窗口内没有任何运动（0.2 s 尺度 %s / 0.8 s 尺度 %.4f，阈值 %.4f）\n" +
                     "本机 |g| %.4f   σ_a %.4f   dt %.3f ms",
                 r.holdS, if (r.slowMotion) "超阈" else "未超阈", r.slowPeak, r.slowThr,
                 r.gravityMag, r.accSigma, r.dt * 1000.0,
@@ -445,7 +487,7 @@ class MainActivity : ComponentActivity() {
         return buildString {
             appendLine(
                 String.format(
-                    Locale.US, "按住 %.2f s → 真实运动 %.2f s → 积分窗口 #%d→#%d（%.2f s）",
+                    Locale.US, "边界跨度 %.2f s → 真实运动 %.2f s → 积分窗口 #%d→#%d（%.2f s）",
                     r.holdS, r.motionS, r.windowStart, r.windowEnd, r.windowS,
                 )
             )
@@ -521,7 +563,7 @@ class MainActivity : ComponentActivity() {
         if (acc.isEmpty()) return "（无样本）"
         val t0 = acc.first().tNs
         val sb = StringBuilder()
-        sb.appendLine("滑动测量（按住式边界）")
+        sb.appendLine(ui.mode)
         sb.appendLine("样本  acc ${acc.size} / gyr $gyrCount")
         if (marks.isEmpty()) {
             sb.appendLine("未捕获到触摸事件")
@@ -540,7 +582,12 @@ class MainActivity : ComponentActivity() {
         }
         if (down != null && up != null) {
             val spanMs = (up.eventMs - down.eventMs)
-            sb.appendLine(String.format(Locale.US, "按住时长（事件时刻之差） %d ms", spanMs))
+            sb.appendLine(
+                String.format(
+                    Locale.US, "边界跨度（事件时刻之差） %d ms%s",
+                    spanMs, if (ui.tapMode) "   ←点按式：两次点击的落下时刻" else "",
+                )
+            )
         }
         when {
             result == null -> sb.appendLine("未捕获到完整的 DOWN/UP —— 本次无法测距")
@@ -577,6 +624,8 @@ private fun ProbeScreen(
     onSlideEnter: () -> Unit,
     onSlideDown: (Long, Long, Long) -> Unit,
     onSlideUp: (Long, Long, Long) -> Unit,
+    onSlideTap: (Long, Long, Long) -> Unit,
+    onTapModeChange: (Boolean) -> Unit,
     onSlideExit: () -> Unit,
 ) {
     Scaffold { pad ->
@@ -657,29 +706,60 @@ private fun ProbeScreen(
             }
 
             if (ui.slideMode) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("点按切换式", fontSize = 13.sp)
+                        Text("点一下开始、再点一下结束（不用一直按着屏幕）", fontSize = 11.sp)
+                    }
+                    // 已经点过第一下就不让切了 —— 一次测量中途换操作方式，边界会错乱。
+                    Switch(
+                        checked = ui.tapMode,
+                        onCheckedChange = onTapModeChange,
+                        enabled = ui.slideMarks == 0,
+                    )
+                }
                 Text(
-                    "① 把手机放稳，静置 2 秒（学本机噪声底，指示灯变绿）→ ② 按住按钮 → " +
-                        "③ 按住停稳约半秒再推 → ④ 1~2 秒内推完 → ⑤ 松手 → " +
-                        "⑥ 手别碰，等手机停稳出数。\n" +
-                        "两条硬规则（都是引擎的硬要求，不是客气话）：\n" +
-                        "· 起手要静：推之前手机得先静止约半秒 —— 这段是引擎的起点锚点兼校准段，" +
-                        "没有它就只能拒答。放稳前别开始推，手指也别晃手机。\n" +
-                        "· 收手要静：松手后手别碰，等手机停稳。注意不是要你在松手那一刻停住 —— " +
-                        "滑过松手时刻完全没关系；引擎要的是**滑动结束之后**那段静止，用来定标残余误差。\n" +
-                        "· 中途停顿没事了：一次按住里就算停几下也会被合成一段，" +
-                        "不会再把一次滑动切碎量一半。但还是尽量一口气推完 —— 停顿对距离零贡献，" +
-                        "却按 T² 放大误差；拖到 4 秒误差会大一个数量级。",
+                    if (ui.tapMode) {
+                        "① 手机放稳，静置 2 秒 → ② 点一下大按钮（起点）→ " +
+                            "③ 推手机（推的那只手别碰屏幕）→ ④ 到位后停住，把手机按住不动 → " +
+                            "⑤ 腾出手点第二下（终点）→ ⑥ 手别碰，等手机停稳出数。\n" +
+                            "两条硬规则：\n" +
+                            "· 起手要静：点第一下之前手机得静置约半秒 —— 这段是起点锚点兼校准段。\n" +
+                            "· 收手要静：点第二下时手机必须已经停住、并且被按着不动。点按式的风险全在这里 —— " +
+                            "手机还在滑就点第二下，等于把终点锚点扔了（真机上出过 15 cm 测成 1.4 cm 的事）。\n" +
+                            "· 中途停顿没事，但仍尽量一口气推完 —— 停顿对距离零贡献，却按 T² 放大误差。"
+                    } else {
+                        "① 把手机放稳，静置 2 秒（学本机噪声底，指示灯变绿）→ ② 按住按钮 → " +
+                            "③ 按住停稳约半秒再推 → ④ 1~2 秒内推完 → ⑤ 抬手指 → " +
+                            "⑥ 手别碰，等手机停稳出数。\n" +
+                            "两条硬规则（都是引擎的硬要求，不是客气话）：\n" +
+                            "· 起手要静：推之前手机得先静止约半秒 —— 这段是引擎的起点锚点兼校准段，" +
+                            "没有它就只能拒答。放稳前别开始推，手指也别晃手机。\n" +
+                            "· 收手要静：抬手指之前，先用按着的那根手指把手机停住、按住 1~2 秒，再抬。\n" +
+                            "  抬手指那一下本身就会给手机一个扰动；手机还在滑就抬，标为「静止」的终点段" +
+                            "其实还在动，引擎会把真实位移当漂移扣掉。\n" +
+                            "· 中途停顿没事了：一次按住里就算停几下也会被合成一段，" +
+                            "不会再把一次滑动切碎量一半。但还是尽量一口气推完 —— 停顿对距离零贡献，" +
+                            "却按 T² 放大误差；拖到 4 秒误差会大一个数量级。"
+                    },
                     fontSize = 13.sp,
                 )
                 StabilityBar(ui)
                 SlidePad(
                     pressed = ui.pressed,
+                    tapMode = ui.tapMode,
                     onDown = onSlideDown,
                     onUp = onSlideUp,
+                    onTap = onSlideTap,
                 )
                 Text(
                     when {
-                        ui.slideTail -> "已松手 · 手别动，等手机停稳出数…"
+                        ui.slideTail -> "已结束 · 手别动，等手机停稳出数…"
+                        ui.tapMode && ui.pressed -> "● 已开始 · 推手机，到位后停住再点一下结束"
+                        ui.tapMode -> "点一下开始"
                         ui.pressed && ui.still -> "● 测量中 · 已静止（该推了）"
                         ui.pressed -> "● 测量中 · 还在动"
                         else -> "按住开始"
@@ -768,7 +848,16 @@ private fun StabilityBar(ui: UiState) {
                 .background(if (ui.still) green else red)
         )
         Text(
-            if (ui.still) "静止 · 可以松手" else "在动 · 继续按住",
+            when {
+                // 点按式下这盏灯的用处变了：按住式的"松手"是自然动作，点按式的"点第二下"
+                // 却必须挑时机 —— 手机还在滑就点，等于把终点锚点扔了。所以这里直说该不该点。
+                ui.tapMode && ui.pressed && ui.still -> "静止 · 可以点第二下"
+                ui.tapMode && ui.pressed -> "在动 · 先别点第二下"
+                ui.tapMode && ui.still -> "静止 · 可以点第一下"
+                ui.tapMode -> "在动 · 先等手机放稳"
+                ui.still -> "静止 · 可以松手"
+                else -> "在动 · 继续按住"
+            },
             fontSize = 13.sp,
             color = if (ui.still) green else red,
         )
@@ -780,43 +869,63 @@ private fun StabilityBar(ui: UiState) {
 }
 
 /**
- * 按住式测量的大按钮。
+ * 测量大按钮。两种操作方式，共用同一个矩形与同一套事件时刻。
  *
- * 直接用底层指针事件而不是 `clickable` / `detectTapGestures`，因为要拿到
- * `PointerInputChange.uptimeMillis`（事件**发生**的时刻），而不仅仅是"回调被调用的时刻"。
- * 两者之差就是输入延迟 —— 这次要顺带量出来的量。
+ * 按住式：DOWN 记起点、UP 记终点 —— 手指必须一直按在屏幕上。
+ * 点按式：每次**点落**调一次 [onTap]，第一次当起点、第二次当终点。
+ * 之所以两种都只取 `PointerInputChange.uptimeMillis`（事件**发生**的时刻）而不取
+ * 回调被调用的时刻，是为了量出输入延迟 —— 那个差值本身也是数据。
  */
 @Composable
 private fun SlidePad(
     pressed: Boolean,
+    tapMode: Boolean,
     onDown: (Long, Long, Long) -> Unit,
     onUp: (Long, Long, Long) -> Unit,
+    onTap: (Long, Long, Long) -> Unit,
 ) {
     val idle = MaterialTheme.colorScheme.surfaceVariant
     val active = MaterialTheme.colorScheme.primary
+    val label = when {
+        tapMode && pressed -> "● 进行中 · 点一下结束"
+        tapMode -> "点一下开始"
+        pressed -> "● 测量中"
+        else -> "按住开始"
+    }
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .height(180.dp)
             .clip(RoundedCornerShape(18.dp))
             .background(if (pressed) active else idle)
-            .pointerInput(Unit) {
+            .pointerInput(tapMode) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
-                    onDown(
-                        down.uptimeMillis,
-                        SystemClock.uptimeMillis(),
-                        SystemClock.elapsedRealtimeNanos(),
-                    )
+                    if (tapMode) {
+                        onTap(
+                            down.uptimeMillis,
+                            SystemClock.uptimeMillis(),
+                            SystemClock.elapsedRealtimeNanos(),
+                        )
+                    } else {
+                        onDown(
+                            down.uptimeMillis,
+                            SystemClock.uptimeMillis(),
+                            SystemClock.elapsedRealtimeNanos(),
+                        )
+                    }
+                    // 两种模式都要把这个手势跟到抬起，否则 awaitEachGesture 不会开下一轮。
                     while (true) {
                         val ev = awaitPointerEvent()
                         val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
                         if (!ch.pressed) {
-                            onUp(
-                                ch.uptimeMillis,
-                                SystemClock.uptimeMillis(),
-                                SystemClock.elapsedRealtimeNanos(),
-                            )
+                            if (!tapMode) {
+                                onUp(
+                                    ch.uptimeMillis,
+                                    SystemClock.uptimeMillis(),
+                                    SystemClock.elapsedRealtimeNanos(),
+                                )
+                            }
                             break
                         }
                     }
@@ -825,7 +934,7 @@ private fun SlidePad(
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            if (pressed) "● 测量中" else "按住开始",
+            label,
             fontSize = 22.sp,
             color = if (pressed) MaterialTheme.colorScheme.onPrimary
             else MaterialTheme.colorScheme.onSurfaceVariant,
