@@ -136,16 +136,22 @@ data class MeasureResult(
     val dt: Double = 0.0,
     val slowPeak: Double = 0.0,
     val slowThr: Double = 0.0,
-    /** 陀螺零偏**不稳定性**（rad/s，τ 尺度）：静止段内分段均值之差 /√2。抹不掉的那部分。 */
-    val gyroInstability: Double = 0.0,
-    /** 上面的估计所依据的时间尺度（秒）。 */
-    val gyroInstTauS: Double = 0.0,
     /**
-     * 姿态漂移造成的位移误差**上界**（米）：(1/6)·g·σ_bg·√(T/τ)·T³。
-     * **∝ T³** —— 滑动时间减半，误差降到 1/8，比任何算法微调都管用。
-     * 保守上界（假设游走全朝一个方向），只作操作引导，不据此拒答。
+     * **起手前静止段里的角抖动**（rad/s）与它所在的 τ（秒）。
+     *
+     * ⚠ 名字里没有「零偏」是有意的 —— 它**不是**陀螺零偏不稳定性。
+     * 库里 `20261011_085650` 是一段 76 s 纯静止录制，在那上面：5 s 窗口的零偏均值
+     * 全落在 ±3e-5 rad/s 内、无单调漂移；Allan deviation 从 10 ms 到 9.7 s 一路
+     * 单调下降、无平台也无回升 ⟹ 这台 K40 的零偏**不游走**，该段本值仅 1.4e-5。
+     * 而它在别的采集上给 0.0001~0.17、且**按场次干净分层**：桌面受控场次
+     * （100444/100459/100529）0.0001~0.0004，"姿态随意"手持场次
+     * （143719/143725/143734）0.012~0.020。⟹ 它量的是**起手前手抖不抖**。
+     *
+     * 只作诊断，**不**据此拒答：按场次分层很清楚，但只有 3 条手持硬真值，
+     * 定阈值等于用真值调参。
      */
-    val attBudgetM: Double = 0.0,
+    val startTremorRadS: Double = 0.0,
+    val startTremorTauS: Double = 0.0,
     /** 窗口内**运动段**上裸速度的峰值（米/秒）。只用来判断终点锚点可信度。 */
     val vPeakMps: Double = 0.0,
     /**
@@ -480,12 +486,12 @@ object SlideMeasure {
         }
         if (plo > phi) { plo = distHead; phi = distHead }
 
-        // ---- 10. 姿态漂移的误差上界 ∝ T³ ----
-        // "对操作要求高"的物理根源：陀螺零偏的游走抹不掉，它在运动段里变成
-        // 姿态漂移 → 重力泄漏 → 位移误差 ∝ T³。滑快一倍，误差降到 1/8。
-        // 只作操作引导，不据此拒答 —— 它是保守上界（假设游走全朝一个方向）。
-        val inst = gyroBiasInstability(gx, gy, gz, run0, dt)
-        val attBudget = attitudeDriftBudget(gMag, inst[0], inst[1], (w1 - w0) * dt)
+        // ---- 10. 起手前静止段的角抖动（端点参考稳不稳）----
+        // 不算"姿态漂移上界"：那个 ∝T³ 的定律已删 —— 前提（零偏游走）被 76 s
+        // 静止录制证伪，且它给出的预算与实际误差**反相关**（预算 5.4 cm 的 143734
+        // 错得最狠 −90%，预算 35.7 cm 的 143725 反而 +5%）。详见 MeasureResult
+        // 里 startTremorRadS 的注释与 sim/measure2.py 的 anchor_gyro_tremor。
+        val tremor = anchorGyroTremor(gx, gy, gz, run0, dt)
 
         // ---- 11. 终点锚点可信度（只诊断，不拒答；理由见 MeasureResult.anchorSuspect）----
         val vPeak = motionVelPeak(lx, ly, lz, w0, w1, m0, m1, dt)
@@ -518,9 +524,8 @@ object SlideMeasure {
             accSigma = sigma,
             gyroBiasNorm = bias.norm(),
             dt = dt,
-            gyroInstability = inst[0],
-            gyroInstTauS = inst[1],
-            attBudgetM = attBudget,
+            startTremorRadS = tremor[0],
+            startTremorTauS = tremor[1],
             vPeakMps = vPeak,
             anchorSuspect = anchorSuspect,
         )
@@ -608,16 +613,20 @@ private fun runContaining(flags: BooleanArray, i: Int, n: Int): IntArray {
 }
 
 /**
- * 静止段内估计陀螺零偏**不稳定性**（不是零偏本身）。
+ * 静止段里的**角抖动**（rad/s）—— 不是陀螺零偏不稳定性，别再那么叫。
  *
- * 零偏的常值部分能被校准段平均掉；抹不掉的是它在测量时长内的游走，
- * 而那正是姿态漂移 → 重力泄漏的源头。做法：把静止段切成 4 段，
- * 相邻段均值之差的模长 /√2 就是该时长尺度上零偏变化的 σ。
+ * 做法：把静止段切成 4 段，相邻段均值之差的模长 /√2，就是该时长尺度上
+ * "角速度在这段里变了多少"。切 4 段而不是更多，是因为白噪声在段均值里按
+ * 1/√h 衰减 —— 段越短估计越大，4 段是让 τ 尽量长的取法。
  *
- * 返回 (σ rad/s, τ s)；τ 是估计所依据的时间尺度，外推到其他时长用 √(T/τ)。
- * 静止段太短（<16 样本）时返回 (0, 0) = 不可估。
+ * 它量的是**起手前手抖不抖**（端点参考稳不稳），依据见 MeasureResult
+ * 里 startTremorRadS 的注释：76 s 纯静止录制上零偏既不游走、Allan 也无平台，
+ * 而它在真机各条采集上按场次分层（桌面 0.0001~0.0004 / 手持 0.012~0.020）。
+ *
+ * 返回 [σ rad/s, τ s]。τ 必须一起报：同一个角抖动在 τ=76 ms 与 τ=304 ms 上
+ * 不是同一个数。静止段太短（<16 样本）时返回 [0, 0] = 不可估。
  */
-private fun gyroBiasInstability(
+private fun anchorGyroTremor(
     gx: DoubleArray, gy: DoubleArray, gz: DoubleArray,
     run: IntArray, dt: Double,
 ): DoubleArray {
@@ -636,17 +645,6 @@ private fun gyroBiasInstability(
     var acc = 0.0
     for (j in 0 until k - 1) acc += (segs[j + 1] - segs[j]).norm()
     return doubleArrayOf(acc / (k - 1) / Math.sqrt(2.0), h * dt)
-}
-
-/**
- * 姿态漂移造成的位移误差上界（米）。
- * 角速度误差 b_g 常值时：θ = b_g·t，泄漏 = g·θ，位移误差 = (1/6)·g·b_g·T³。
- * 零偏是游走的，在 T 尺度上的不确定度由 τ 尺度的 σ 按 √(T/τ) 扩散。
- */
-private fun attitudeDriftBudget(gMag: Double, sigmaBg: Double, tau: Double, t: Double): Double {
-    if (sigmaBg <= 0.0 || tau <= 0.0 || t <= 0.0) return 0.0
-    val sigmaT = sigmaBg * Math.sqrt(t / tau)
-    return gMag * sigmaT * t * t * t / 6.0
 }
 
 // ------------------------------------------------------------------ 姿态

@@ -280,14 +280,35 @@ def zupt_two_anchor(a_lin, w0, w1, run0, run1, dt, quad=False):
         [vnorm(vc[i - w0]) for i in range(*run1)]))
 
 
-def gyro_bias_instability(gyr, run, dt):
-    """静止段内估计陀螺零偏**不稳定性**（不是零偏本身）。
+def anchor_gyro_tremor(gyr, run, dt):
+    """静止段里的**角抖动**（rad/s）—— 它不是陀螺零偏不稳定性，别再那么叫。
 
-    零偏的常值部分能被校准段平均掉；抹不掉的是它在测量时长内的游走，
-    而那正是姿态漂移 → 重力泄漏的源头。做法：把静止段切成 4 段，
-    相邻段均值之差的模长 /√2 就是该时长尺度上零偏变化的 σ。
+    做法：把静止段切成 4 段，相邻段均值之差的模长 /√2，就是该时长尺度上
+    "角速度在这段里变了多少"。切 4 段而不是更多，是为了让 τ 尽量长：
+    白噪声在段均值里按 1/√h 衰减，段越短估计越大。
 
-    返回 (σ rad/s, τ s)；τ 是估计所依据的时间尺度，外推到其他时长用 √(T/τ)。
+    ## 它到底量的是什么（2026-10-16，用库里那段 76 s 静止录制查清）
+
+    `20261011_085650` 是一段 76 s 的纯静止录制（meta 里按住时长 0 ms，没做滑动）。
+    在那一段上：
+      · 5 s 窗口的零偏均值全部落在 ±3e-5 rad/s 内，随机散布、无单调漂移；
+      · Allan deviation 从 10 ms 到 9.7 s **一路单调下降**（0.00052 → 7.8e-6 rad/s），
+        全程没有平台（flicker 的斜率 0）也没有回升（速率随机游走的 +0.5）。
+    ⟹ **这台 K40 的零偏不游走。** 该静止段上本函数只给 1.4e-5 rad/s。
+
+    可它在别的采集上给的是 0.0001~0.17 —— 跨 3 个数量级，而且**按场次干净分层**：
+      桌面受控场次 100444/100459/100529 → 0.00012~0.00041（≈ 器件噪声底）
+      "姿态随意"手持场次 143719/143725/143734 → 0.0123~0.0200（差 30~170 倍）
+    ⟹ 它量的是**起手前那一下手抖不抖**，即端点参考稳不稳，不是器件漂移。
+
+    `attitude_drift_budget`（(1/6)·g·σ·√(T/τ)·T³）已删，理由两条：
+      ① 物理前提被上面那段数据证伪（零偏既不游走、σ 也不随 τ 增长）；
+      ② 它算出的 T³ 预算与实际误差**反相关** —— 预算 5.4 cm 的 143734 错得
+         最狠（−90%），预算 35.7 cm 的 143725 反而 +5%。一个被自己的数据
+         违反 2.5 倍的"上界"不是上界。
+
+    返回 (σ rad/s, τ s)。τ 必须一起报 —— 同一个角抖动在 τ=76 ms 与 τ=304 ms
+    上不是同一个数，脱离 τ 谈它是没意义的。
     """
     a, b = run
     n = b - a
@@ -301,19 +322,6 @@ def gyro_bias_instability(gyr, run, dt):
                   for x in range(3)) for j in range(k)]
     d = [vnorm(vsub(segs[j], segs[j + 1])) for j in range(k - 1)]
     return statistics.fmean(d) / math.sqrt(2.0), h * dt
-
-
-def attitude_drift_budget(g_mag, sigma_bg, tau, T):
-    """姿态漂移造成的位移误差上界（米）。
-
-    角速度误差 b_g 常值时：θ = b_g·t，泄漏 = g·θ，位移误差 = (1/6)·g·b_g·T³。
-    零偏是游走的，在 T 尺度上的不确定度由 τ 尺度的 σ 按 √(T/τ) 扩散。
-    **∝ T³** —— 这是本项目最强的杠杆：滑动时间减半，误差降到 1/8。
-    """
-    if not sigma_bg or not tau or T <= 0:
-        return 0.0
-    sigma_T = sigma_bg * math.sqrt(T / tau)
-    return (1.0 / 6.0) * g_mag * sigma_T * T ** 3
 
 
 def principal_dir(pts, iters=60):
@@ -620,14 +628,13 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
     model_gap = abs(bare_head - dist_head)
     model_sensitive = model_gap > max(dist_head, MODEL_GAP_FLOOR_M)
 
-    # ---- 6c. 姿态漂移的误差上界 ∝ T³ ----
-    # 这是本项目最强的杠杆，也是"对操作要求高"的物理根源：陀螺零偏的**游走**
-    # 抹不掉，它在运动段里变成姿态漂移，再变成重力泄漏，位移误差 ∝ T³。
-    # 实测三条硬真值（15 cm）：T=0.69 s → 上界 6 cm；T=1.44 s → 25 cm；
-    # T=1.49 s → 37 cm。滑动时间减半，误差降到 1/8 —— 比任何算法微调都管用。
-    gyr_inst, gyr_tau = gyro_bias_instability(gyr, run0, dt)
-    t_win = (w1 - w0) * dt
-    att_budget = attitude_drift_budget(g_mag, gyr_inst, gyr_tau, t_win)
+    # ---- 6c. 起手前静止段的角抖动（端点参考稳不稳）----
+    # 名字里刻意没有"零偏"：它量的是**手抖**，不是器件漂移 —— 依据见
+    # anchor_gyro_tremor 的 docstring（76 s 静止录制证伪了游走假设）。
+    # 这里只算、只报，**不**据此拒答、也不乘 T³ 外推：它按场次分层很清楚
+    # （桌面 0.0001~0.0004 vs 手持 0.012~0.020），但只有 3 条手持硬真值，
+    # 定一条阈值就等于用真值调参。
+    tremor, tremor_tau = anchor_gyro_tremor(gyr, run0, dt)
 
     # ---- 6d. 锚点可信度：松手之后手机到底停了没有 ----
     # 「松手」不等于「停住」：手离开后手机常常还在滑。而**匀速滑动与静止在加速度计上
@@ -694,20 +701,17 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
            "dRr": tuple(d_lever),
            "axisDistM": dist_axis, "axis": e,
            "straightness": straightness, "straightRms": straight_rms,
-           # 姿态漂移预算（∝T³）与它的输入。只作诊断与操作引导，不据此拒答 ——
-           # 它是保守上界（假设游走全朝一个方向、且双锚点一点没扣），实测误差通常小得多。
-           "gyroInstability": gyr_inst, "gyroInstTauS": gyr_tau,
-           "attBudgetM": att_budget}
+           # 起手前静止段的角抖动（端点参考稳不稳）与它所在的 τ。
+           # 只作诊断，不拒答 —— 见 6c 与 anchor_gyro_tremor。
+           "startTremorRadS": tremor, "startTremorTauS": tremor_tau}
     warns = []
     if end_hit_bound:
         warns.append("松手后手机在 %0.1f s 内没有停稳（运动一直延续到数据末尾）" % tail_s)
     if out["tailStaticS"] < MARGIN_S:
         warns.append("松手后只留了 %.2f s 静止当终点锚点（引擎要 ≥%.2f s），这个数不可靠 —— "
                      "松手后手别碰、多等一会儿" % (out["tailStaticS"], MARGIN_S))
-    if model_sensitive:
-        warns.append("这个数由残差模型决定，不是由数据决定：裸积分 %.2f cm、去趋势 %.2f cm，"
-                     "修正量是答案的 %.0f%% —— 平台窄只说明端点稳，说明不了模型对"
-                     % (bare * 100, dist * 100, model_gap / max(dist, 1e-9) * 100))
+    # model_sensitive 不再进 warns：它在 §8 直接变成拒答，reason 里已经说了同一件事，
+    # 再挂一条"这个数由残差模型决定"的提醒是自相矛盾（一边说别信、一边把数递出去）。
     if anchor_suspect:
         # 不拒答、只提醒：这条判据没有干净分界线（见 6d 的注释）。
         # 但它是 143734 那个 15 cm → 1.44 cm 的病根，值得直说。

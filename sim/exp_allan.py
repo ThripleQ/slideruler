@@ -37,15 +37,21 @@ def static_segments(series, min_len=40):
     return [(a, b) for (a, b) in series if b - a >= min_len]
 
 
-def allan_curve(rows, max_tau_frac=0.25, min_pairs=3):
+def allan_curve(rows, taus=(1, 2, 4, 8, 16, 32, 64), min_pairs=3, robust=False):
     """重叠式 Allan deviation。
 
     rows：[[(x,y,z), ...], ...] 若干条独立的静止段（每条段内不跨接）。
-    返回 {τ(样本数): σ}，σ 按三轴合并（先算每轴、再取平均）。
+    taus：τ 的网格（单位：样本数）。
+    返回 {τ(样本数): σ}，σ 按三轴合并。
+
+    robust=False（默认）：σ = sqrt(mean(d²)/2) —— 经典 Allan，对离群敏感。
+    robust=True：σ = median(|d|/√2) —— 抗离群。本项目**必须**看这一条：
+      真机静止段里有假静止（匀速段被静止检测误判），它们把 RMS 撑高一个量级。
+      两者之差 = "上升段到底是真的零偏游走，还是少数几条在动的段撑起来的"。
     """
     out = {}
-    for tau in (1, 2, 4, 8, 16, 32, 64):
-        vals = []
+    for tau in taus:
+        sq, ab = [], []
         for seg in rows:
             n = len(seg)
             if n < tau * min_pairs:
@@ -57,9 +63,11 @@ def allan_curve(rows, max_tau_frac=0.25, min_pairs=3):
                 for i in range(0, n - 2 * tau + 1):
                     a = (cum[i + tau] - cum[i]) / tau
                     b = (cum[i + 2 * tau] - cum[i + tau]) / tau
-                    vals.append((a - b) ** 2)
-        if vals:
-            out[tau] = math.sqrt(statistics.fmean(vals) / 2.0)
+                    sq.append((a - b) ** 2)
+                    ab.append(abs(a - b) / math.sqrt(2.0))
+        if sq:
+            out[tau] = (statistics.median(ab) if robust
+                        else math.sqrt(statistics.fmean(sq) / 2.0))
     return out
 
 
@@ -138,20 +146,66 @@ def collect_sim(cfg_kw, n_seg=40, seg_len=140, hz=105.1, seed=1):
     return gyr_rows, acc_rows
 
 
-def show(title, curve, unit, dt):
+def show(title, curve, unit, dt, curve_med=None):
+    """打印 Allan 曲线。给了 curve_med 就把 RMS 与中位数版本并排，并给比值。
+
+    比值列是**判别力所在**：RMS/中位数 ≈1 说明分布对称、没有离群段；
+    远大于 1（真机陀螺在 τ≤76 ms 上是 1.4~2.6）说明这一段的"上升"
+    主要是少数在动的假静止段撑起来的，不是零偏本身在游走。
+    """
     print("  %s （σ 单位 %s）" % (title, unit))
     ts = list(curve)
     print("    τ(ms)  " + "".join("%10s" % ("%.0f" % (t * dt * 1000)) for t in ts))
-    print("    σ      " + "".join("%10.6g" % curve[t] for t in ts))
+    print("    σ(RMS) " + "".join("%10.6g" % curve[t] for t in ts))
     print("    斜率   " + "".join(
         "%10s" % ("—" if i == 0 else "%.2f" % (
             (math.log(curve[ts[i]]) - math.log(curve[ts[i - 1]]))
             / (math.log(ts[i]) - math.log(ts[i - 1]))))
         for i in range(len(ts))))
+    if curve_med is not None:
+        print("    σ(中位)" + "".join("%10.6g" % curve_med[t] for t in ts))
+        print("    斜率   " + "".join(
+            "%10s" % ("—" if i == 0 else "%.2f" % (
+                (math.log(curve_med[ts[i]]) - math.log(curve_med[ts[i - 1]]))
+                / (math.log(ts[i]) - math.log(ts[i - 1]))))
+            for i in range(len(ts))))
+        print("    RMS/中位" + "".join("%10.2f" % (curve[t] / curve_med[t])
+                                     for t in ts))
     if len(ts) >= 2:
         pk = max(ts, key=lambda t: curve[t])
         print("    峰值 %.5g @ τ=%.0f ms  （白噪声 −0.5 / 有界游走：先升后降 / 无界游走 +0.5）"
               % (curve[pk], pk * dt * 1000))
+        if curve_med is not None:
+            pkm = max(ts, key=lambda t: curve_med[t])
+            print("    峰值 %.5g @ τ=%.0f ms（中位数版）"
+                  % (curve_med[pkm], pkm * dt * 1000))
+
+
+def longest_static(ROOT_dir):
+    """全库最长的一条连续静止段。返回 (名字, a, b, acc, gyr, dt, 总样本)。"""
+    best = (0, None, None)
+    for nm in sorted(os.listdir(ROOT_dir)):
+        d = os.path.join(ROOT_dir, nm)
+        if not os.path.isdir(d):
+            continue
+        try:
+            acc, gyr, dn, up, dt = __import__("exp_real").load(d)
+        except Exception:
+            continue
+        n = min(len(acc), len(gyr))
+        acc, gyr = acc[:n], gyr[:n]
+        flags, *_ = M.static_flags(acc, gyr, (0.0, 0.0, 0.0), dt)
+        a = None
+        for i, f in enumerate(list(flags) + [False]):
+            if f and a is None:
+                a = i
+            elif not f and a is not None:
+                if i - a > best[0]:
+                    best = (i - a, nm, (a, i))
+                a = None
+    ln, nm, (a, b) = best[0], best[1], best[2]
+    acc, gyr, dn, up, dt = __import__("exp_real").load(os.path.join(ROOT_dir, nm))
+    return nm, a, b, acc, gyr, dt, len(acc)
 
 
 def main():
@@ -161,8 +215,21 @@ def main():
     print("  采集 %d 条，静止段 %d 段 / 加速度 %d 段，累计静止 %.1f s"
           % (nf, len(gyr_rows), len(acc_rows), total_s))
     dt = 0.009514
-    show("陀螺", allan_curve(gyr_rows), "rad/s", dt)
-    show("加速度", allan_curve(acc_rows), "m/s²", dt)
+    show("陀螺", allan_curve(gyr_rows), "rad/s", dt,
+         allan_curve(gyr_rows, robust=True))
+    show("加速度", allan_curve(acc_rows), "m/s²", dt,
+         allan_curve(acc_rows, robust=True))
+
+    print()
+    print("=" * 88)
+    nm, a, b, acc, gyr, dtx, n_all = longest_static(ROOT)
+    print("最长单条静止段：%s  样本 [%d,%d) = %d 样本 = %.1f s（整条录制 %.1f s）"
+          % (nm, a, b, b - a, (b - a) * dtx, n_all * dtx))
+    print("  —— 这一段直接回答\"零偏 1~60 s 尺度有界还是无界\"，不必等新的长静止采集")
+    seg = [gyr[i] for i in range(a, b)]
+    taus = (1, 4, 16, 64, 256, 1024, 2048)
+    show("陀螺（整段，未扣均值）", allan_curve([seg], taus=taus), "rad/s", dtx,
+         allan_curve([seg], taus=taus, robust=True))
 
     print()
     print("=" * 88)
@@ -172,11 +239,14 @@ def main():
         ("无界随机游走 rw=0.02（当前在用）", dict(gyr_bias_rw=0.02)),
         ("有界游走 GM(0.0045 rad/s, 50 ms)", dict(gyr_bias_gm=(0.0045, 0.05))),
         ("有界 + 小游走 rw=0.003", dict(gyr_bias_rw=0.003, gyr_bias_gm=(0.0045, 0.05))),
+        ("有界 三倍幅值 GM(0.0135, 50 ms) + rw=0.003", dict(
+            gyr_bias_rw=0.003, gyr_bias_gm=(0.0135, 0.05))),
     ):
         gyr_rows_s, acc_rows_s = collect_sim(dict(
             gyr_noise=0.002, acc_noise=0.008, gyr_bias=(0, 0, 0), **kw))
         print("  --- %s ---" % tag)
-        show("陀螺", allan_curve(gyr_rows_s), "rad/s", 1 / 105.1)
+        show("陀螺", allan_curve(gyr_rows_s), "rad/s", 1 / 105.1,
+             allan_curve(gyr_rows_s, robust=True))
 
 
 if __name__ == "__main__":

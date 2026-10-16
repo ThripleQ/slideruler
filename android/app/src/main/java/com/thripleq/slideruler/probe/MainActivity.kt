@@ -408,17 +408,17 @@ class MainActivity : ComponentActivity() {
                 r.anchorDrift, r.vPeakMps,
             )
         }
-        // 滑太慢：陀螺零偏游走 → 姿态漂移 → 重力泄漏，误差随时长**立方**增长。
-        // 硬真值实测（15 cm）：滑 0.69 s 误差 -6.5%；滑 1.4~1.5 s 误差 -22%/+6% 且互不稳定。
-        // 上界超过读数时，平台带宽已经没有意义 —— 最重要的建议是"重滑、快一点"。
-        if (r.attBudgetM > r.distanceM) {
-            return String.format(
-                Locale.US, "读数可能不准：滑动用时 %.2f s 太长 —— 陀螺漂移的误差上界 " +
-                    "%.1f cm 已超过读数本身。误差随滑动时长的**立方**增长" +
-                    "（滑快一倍，误差降到 1/8），请一口气快些滑完、别在中途停顿",
-                r.motionS, r.attBudgetM * 100,
-            )
-        }
+        // 这里原来还有一条"滑太慢 / 陀螺漂移上界 ∝T³"的报警，**已删**（2026-10-16）。
+        // 两条理由，都是数据给的：
+        //  ① 物理前提被证伪。库里 20261011_085650 是 76 s 纯静止录制，那上面零偏
+        //     5 s 窗口均值全落在 ±3e-5 rad/s 内、无漂移，Allan deviation 从 10 ms
+        //     到 9.7 s 一路单调下降、无平台也无回升 —— 这台 K40 的零偏**不游走**。
+        //  ② 它算出的预算与实际误差**反相关**：预算 5.4 cm 的 143734 错得最狠
+        //     （−90%），预算 35.7 cm 的 143725 反而 +5%。被自己的数据违反 2.5 倍的
+        //     "上界"不是上界；而且它在近乎没动的 122256（0.04 cm）上也会触发。
+        // 那条判据的输入（起手前静止段的角抖动）仍在，但只留在 slideDetail 里
+        // 作诊断：它能把"桌面受控"与"手持"两个场次分开（0.0004 vs 0.015），
+        // 却分不开同一场次里的对与错 —— 没有标注数据之前，定阈值就是拿真值调参。
         val pct = r.confidence * 100.0
         val band = String.format(Locale.US, "%.2f~%.2f cm", r.plateauLoCm, r.plateauHiCm)
         val head = if (r.confidence <= 0.02) "稳"
@@ -483,8 +483,9 @@ class MainActivity : ComponentActivity() {
             )
             appendLine(
                 String.format(
-                    Locale.US, "陀螺零偏游走 %.4f rad/s（τ=%.2f s）→ 姿态漂移上界 %.1f cm（∝T³）",
-                    r.gyroInstability, r.gyroInstTauS, r.attBudgetM * 100,
+                    Locale.US, "起手前静止段角抖动 %.4f rad/s（τ=%.2f s）" +
+                        " —— 桌面受控场次只有 0.0001~0.0004，越大说明起手时手在抖、端点参考越不可靠",
+                    r.startTremorRadS, r.startTremorTauS,
                 )
             )
             append(

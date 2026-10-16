@@ -43,8 +43,22 @@
 真正被拒答的是 **modelSensitive**（见 measure2.py §6e）—— 那个判据本来就在说
 "这个数由模型决定、不是由数据决定"，那它就不该给数。143734 落进那里。
 
+## 追加（2026-10-16）：att_budget 本身也退役了
+
+上面那条"被否的判据"的分母 `att_budget` 已从引擎删除，理由与它作为判据无关：
+① 前提被证伪 —— 库里 `20261011_085650` 是 76 s 纯静止录制，那上面零偏不游走
+   （5 s 窗口均值全在 ±3e-5 rad/s 内、Allan 从 10 ms 到 9.7 s 单调下降、无平台）；
+② 它算出的预算与实际误差**反相关**（预算 5.4 cm 的 143734 错得最狠 −90%，
+   预算 35.7 cm 的 143725 反而 +5%），一个被自己的数据违反 2.5 倍的"上界"不是上界。
+引擎里现在只剩 `startTremorRadS / startTremorTauS`（起手前静止段的角抖动）。
+
+本脚本为了**留痕**，仍按已退役的公式现场重算 V_sup，好让下表逐字可复现：
+    D = (1/6)·g·σ·√(T/τ)·T³   ⟹   V_sup = 2D/T = (1/3)·g·σ·√(T/τ)·T²
+表里那一列标注为"已退役"。**不要**再拿它做任何判据。
+
 用法：python sim/exp_anchor2.py
 """
+import math
 import os
 import sys
 
@@ -57,7 +71,7 @@ from exp_real import load, TRUTH_CM, HARD, ROOT
 def main():
     names = sorted(x for x in os.listdir(ROOT) if os.path.isdir(os.path.join(ROOT, x)))
     print("%-16s %8s %8s %8s %8s %8s  %s" %
-          ("采集", "锚点速度", "运动峰值", "比值", "V_sup", "被否比值", "判定 / 真值"))
+          ("采集", "锚点速度", "运动峰值", "比值", "V_sup退役", "被否比值", "判定 / 真值"))
     print("-" * 112)
     n_susp = n_tot = n_rej_old = 0
     for nm in names:
@@ -74,7 +88,13 @@ def main():
         n_tot += 1
         ratio = ad / vp if vp > 1e-9 else 0.0
         T = m.get("T") or m.get("windowS") or 0.0
-        sup = 2.0 * m.get("attBudgetM", 0.0) / T if T > 0 else 0.0
+        # 已退役的 att_budget 公式（见文件头"追加"），只为留痕、逐字复现旧表：
+        #   D = (1/6)·g·σ·√(T/τ)·T³  ⟹  V_sup = 2D/T
+        sig = m.get("startTremorRadS") or 0.0
+        tau = m.get("startTremorTauS") or 0.0
+        g = m.get("gMag") or 0.0
+        D = (g * sig * math.sqrt(T / tau) * T ** 3 / 6.0) if (sig and tau and T > 0) else 0.0
+        sup = 2.0 * D / T if T > 0 else 0.0
         rej_ratio = ad / sup if sup > 1e-12 else float("inf")
         susp = m.get("anchorSuspect", False)
         n_susp += 1 if susp else 0
