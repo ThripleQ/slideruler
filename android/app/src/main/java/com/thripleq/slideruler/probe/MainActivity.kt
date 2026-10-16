@@ -108,8 +108,14 @@ data class UiState(
      * 再腾出手点第二下 —— 点击那一刻手机是真的静止。
      *
      * 区间语义与按住式**完全一样**（两个触摸时刻之间），所以引擎侧不变。
+     *
+     * 默认 **开**（2026-10-17 改）。证据是同一台机器两批对照，全部指标都不依赖真值：
+     *   点按式 26 条：终点锚点比 0.03、起点角噪声 0.0002 rad/s、σ_a 0.009、修正量 12%
+     *   按住式  4 条：终点锚点比 0.96、起点角噪声 0.0422 rad/s、σ_a 0.149、修正量 29%
+     * 按住式要"手指一直压着屏幕跟着手机推"，压力与手指抖动全程灌进机身，
+     * 抬手指那一下又正好落在终点锚点上。见 `sim/exp_20261017.py`。
      */
-    val tapMode: Boolean = false,
+    val tapMode: Boolean = true,
     val pressed: Boolean = false,
     /** 已松手、正在补采尾部静止段。这 1.5 s 里别动手机，算法要靠它定终点。 */
     val slideTail: Boolean = false,
@@ -131,6 +137,11 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var recorder: ImuRecorder
     private var ui by mutableStateOf(UiState())
+    /**
+     * 只存一个开关：点按/按住的选择。以前没有它，每次进 App 都回到默认的按住式 ——
+     * 2026-10-17 凌晨那批 8 条里 7 条是按住式，而用户以为自己在重复昨晚（点按式）的操作。
+     */
+    private lateinit var prefs: android.content.SharedPreferences
 
     private val main = Handler(Looper.getMainLooper())
     private var startMs = 0L
@@ -218,7 +229,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         recorder = ImuRecorder(this)
+        prefs = getSharedPreferences("slideruler", MODE_PRIVATE)
         ui = ui.copy(
+            tapMode = prefs.getBoolean("tapMode", true),
             device = "${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
             accLabel = recorder.accLabel,
             gyrLabel = recorder.gyrLabel,
@@ -236,7 +249,10 @@ class MainActivity : ComponentActivity() {
                         onSlideDown = { e, u, n -> slideDown(e, u, n) },
                         onSlideUp = { e, u, n -> slideUp(e, u, n) },
                         onSlideTap = { e, u, n -> slideTap(e, u, n) },
-                        onTapModeChange = { v -> ui = ui.copy(tapMode = v) },
+                        onTapModeChange = { v ->
+                            ui = ui.copy(tapMode = v)
+                            prefs.edit().putBoolean("tapMode", v).apply()
+                        },
                         onSlideExit = { exitSlide() },
                     )
                 }
