@@ -20,6 +20,7 @@
 - [03-手机IMU特性实测.md](03-smartphone-imu-characteristics.md) —— 噪声/零偏实测数字 + 对本项目时窗的量级换算
 - [04-Android传感器API笔记.md](04-android-sensor-api.md) —— 官方文档要点：坐标系、软件传感器、报告模式
 - [05-对口先例与竞品.md](05-prior-art.md) —— Wojtek 项目（最接近的先例）、CH Robotics、iOS 侧情况
+- [06-ChatGPT外部指导.md](06-chatgpt-guidance.md) —— 2026-10-11 用户转来的外部指导原文要点 + **逐条进度对照**（哪些做了/被否/未做）
 - [`../implementation-guide.md`](../implementation-guide.md) —— **实现全流程指南**：九阶段每步做什么/数据长什么样/缺陷/怎么验证（小白主文档）
 - `_raw/` —— 搜索结果与页面抓取的原始 JSON（可追溯）
 
