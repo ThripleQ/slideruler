@@ -56,7 +56,12 @@ class SimCfg:
                  gyr_bias=(0.0, 0.0, 0.0),   # rad/s
                  gyr_noise=0.002,            # rad/s 每样本 σ
                  gyr_scale=(0.0, 0.0, 0.0),
-                 gyr_bias_rw=0.0,            # rad/s/√s（in-run instability）
+                 gyr_bias_rw=0.0,            # rad/s/√s（**无界**随机游走：σ 随时间 √t 长）
+                 # 有界游走（一阶 Gauss-Markov / Ornstein-Uhlenbeck）：(σ 稳态 rad/s, τ_c s)
+                 # ⚠ 真机 K40 实测是**有界**的（Allan 曲线先升后降，峰值 0.0036 rad/s @76 ms，
+                 #   见 sim/exp_allan.py）。用无界随机游走会把长窗口的漂移估得过大，
+                 #   从而对"线性 vs 二次残差模型"给出与真机**相反**的判决（见 exp_zupt.py）。
+                 gyr_bias_gm=(0.0, 0.0),
                  # ---- 输出 ----
                  seed=0):
         self.__dict__.update(locals())
@@ -236,11 +241,15 @@ def gen(cfg, head_pos, att, r_body, t_end, t0=0.0):
     acc_ts, acc_t = gen_timestamps(cfg, t_end, rng, 0.0)
     gyr_ts, gyr_t = gen_timestamps(cfg, t_end, rng, cfg.gyr_offset_s)
 
-    def sample(seq_t, M, bias, noise, rw, quant, lp_hz, is_acc):
+    def sample(seq_t, M, bias, noise, rw, quant, lp_hz, is_acc, gm=(0.0, 0.0)):
         out = []
         ba = list(bias)
-        prev = None
+        sg, tc = gm
         dt_nom = 1.0 / cfg.hz
+        a_gm = math.exp(-dt_nom / tc) if tc > 0 else 0.0
+        q_gm = sg * math.sqrt(max(0.0, 1.0 - a_gm * a_gm)) if tc > 0 else 0.0
+        bg = [0.0, 0.0, 0.0]
+        prev = None
         for t in seq_t:
             if is_acc:
                 f, w = imu_from_world(head_pos, att, r_body, t)
@@ -249,6 +258,9 @@ def gen(cfg, head_pos, att, r_body, t_end, t0=0.0):
                 _, w = imu_from_world(head_pos, att, r_body, t)
                 true_v = w
             ba = [ba[i] + rng.gauss(0, walk_per_sample(rw, dt_nom)) for i in range(3)]
+            if tc > 0:
+                bg = [a_gm * bg[i] + q_gm * rng.gauss(0, 1) for i in range(3)]
+                ba = [ba[i] + bg[i] for i in range(3)]
             v = _apply_M(M, true_v)
             v = (v[0] + ba[0] + rng.gauss(0, noise),
                  v[1] + ba[1] + rng.gauss(0, noise),
@@ -266,7 +278,7 @@ def gen(cfg, head_pos, att, r_body, t_end, t0=0.0):
     acc = sample(acc_t, Ma, cfg.acc_bias, cfg.acc_noise, cfg.acc_bias_rw,
                  cfg.acc_quant, cfg.acc_lp_hz, True)
     gyr = sample(gyr_t, Mg, cfg.gyr_bias, cfg.gyr_noise, cfg.gyr_bias_rw,
-                 0.0, 0.0, False)
+                 0.0, 0.0, False, gm=getattr(cfg, "gyr_bias_gm", (0.0, 0.0)))
 
     p0 = head_pos(t0)
     p1 = head_pos(t_end)
