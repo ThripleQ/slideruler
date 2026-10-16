@@ -483,8 +483,8 @@ class MainActivity : ComponentActivity() {
             )
             appendLine(
                 String.format(
-                    Locale.US, "起手前静止段角抖动 %.4f rad/s（τ=%.2f s）" +
-                        " —— 桌面受控场次只有 0.0001~0.0004，越大说明起手时手在抖、端点参考越不可靠",
+                    Locale.US, "起点锚点段角噪声 %.4f rad/s（τ=%.2f s）" +
+                        " —— 桌面受控场次只有 0.0001~0.0004，越大说明起手那段手机没放稳、锚点越不可靠",
                     r.startTremorRadS, r.startTremorTauS,
                 )
             )
