@@ -26,6 +26,11 @@ import org.junit.Test
  *   合成      校准段被运动污染    → 拒答（这一条 Python 有、Kotlin 原本没有）
  *   122416  一次按住被切成 5 段  → 必须**合并**成 #256→#638（旧版只取 0.29 s，报 0.59 cm）
  *   122303  窗内两段运动        → 合并成 #176→#503，平台仍窄（证明合并不是一律搞炸）
+ *   230651  手操 20 cm，1 段      → 20.63 cm（真值 20），全库最干净的一条快滑
+ *   230558  手操 20 cm，3 段合并  → 19.71 cm，窗口 3.64 s
+ *   230538  手操 20 cm，5 段合并  → 17.44 cm，窗口 7.03 s（全库合并段数最多、窗口最长）
+ *   这 3 条是 2026-10-16 批次里的有效条：点按式边界 + 滑完按住不动，终点锚点比值
+ *   0.05~0.27（143 系列是 0.90~1.01）。见 docs/v4-head-model.md §5.6。
  *
  * 下标约定：`measure2.py` 内部把连续段存成半开区间 `[a,b)`，但它另外导出一个
  * `anchorInclusive` = `((a0,b0-1),(a1,b1-1))`。Kotlin 侧统一报**闭区间**（与
@@ -458,6 +463,73 @@ class SlideMeasureTest {
         assertEquals("平台下界 11.36cm", 0.11355627291419963, r.plateauLoM, tol)
         assertEquals("平台上界 11.79cm", 0.11790594818776837, r.plateauHiM, tol)
         assertFalse("干净数据不该报模型敏感", r.modelSensitive)
+    }
+
+    /**
+     * 手操 20 cm 批次（2026-10-16）—— 本项目第一批「数据本身可信 **且** 有尺子真值」的采集。
+     *
+     * 背景：三条硬真值 `1437xx` 后来查明**终点锚点在动**（比值 0.90~1.01）、采集不可用；
+     * `1004xx` 那三条真值是肉眼估的（±0.5 cm）。这一批换 20 cm 尺、整场手操
+     * （自报精度 ±1 cm），并用**点按式边界 + 滑完按住不动**重采 ——
+     * 终点锚点比值掉到 0.05~0.27，两端的锚点问题都回到操作上。见 §5.6。
+     *
+     * 这里锁的是**区间选择**在三个极端下都对：
+     *   `230651` 1 段 / 窗口 2.11 s —— 全库最干净的一条快滑
+     *   `230558` 3 段合并 / 窗口 3.64 s
+     *   `230538` 5 段合并 / 窗口 7.03 s —— 全库合并段数最多、窗口最长的一条
+     *
+     * ⚠ 断言的是「Kotlin 复现了 Python 的同一个答案」，**不是**「误差小于 1 cm」。
+     * 拿真值（20 cm）比误差见 `sim/exp_20cm.py`，而那里真值自身就 ±1 cm。
+     */
+    @Test
+    fun `手操20cm批次 - 单段与多段合并都要给出数`() {
+        // 1 段：裸积分 21.29 → 去趋势 20.63 cm（真值 20）
+        val f1 = load("20261016_230651")
+        val r1 = SlideMeasure.measure(f1.acc, f1.gyr, f1.downNs, f1.upNs)
+        assertTrue("锚点干净，必须给数", r1.ok)
+        assertEquals("距离", 0.2063232178884994, r1.distanceM, tol)
+        assertEquals("平台下界", 0.19995223838603762, r1.plateauLoM, tol)
+        assertEquals("平台上界", 0.20652377856995532, r1.plateauHiM, tol)
+        assertEquals("这一段没被切过", 1, r1.mergedRuns)
+        assertEquals("运动段起点", 585, r1.motionIndex)
+        assertEquals("窗口起点", 570, r1.windowStart)
+        assertEquals("窗口终点", 792, r1.windowEnd)
+        assertEquals("左锚点起点 #88（起手那 1.6 s 静止）", 88, r1.anchorStart)
+        assertEquals("右锚点终点 #1184（闭区间）", 1184, r1.anchorEnd)
+        assertEquals("起手静止时长", 1.99792047, r1.calS, 1e-6)
+        assertEquals("松手后留下 3.88 s 静止", 3.881674056, r1.tailStaticS, 1e-6)
+        assertEquals("裸积分", 0.2129213624795867, r1.bareM, 1e-6)
+        assertEquals("模型分歧", 0.006598144591087318, r1.modelGapM, 1e-6)
+        assertFalse("这次终点锚点是真静止", r1.anchorSuspect)
+        assertFalse("修正量只占答案的 3%，不敏感", r1.modelSensitive)
+
+        // 3 段合并
+        val f2 = load("20261016_230558")
+        val r2 = SlideMeasure.measure(f2.acc, f2.gyr, f2.downNs, f2.upNs)
+        assertTrue(r2.ok)
+        assertEquals("3 段必须合并", 3, r2.mergedRuns)
+        assertEquals("距离", 0.1970583588037635, r2.distanceM, tol)
+        assertEquals("窗口起点", 339, r2.windowStart)
+        assertEquals("窗口终点", 722, r2.windowEnd)
+        assertEquals("裸积分", 0.20940880445548604, r2.bareM, 1e-6)
+        assertEquals("模型分歧", 0.012350445651722552, r2.modelGapM, 1e-6)
+        assertEquals("松手后留下 3.50 s 静止", 3.501136912, r2.tailStaticS, 1e-6)
+        assertFalse(r2.anchorSuspect)
+
+        // 5 段合并 + 全库最长窗口（7.03 s）：扣掉 15.96 cm，占答案 17.46 的 91%
+        // —— 逼近但没过 100% 那条线，所以仍然给数（而不是像 122416 那样拒答）。
+        val f3 = load("20261016_230538")
+        val r3 = SlideMeasure.measure(f3.acc, f3.gyr, f3.downNs, f3.upNs)
+        assertTrue("91% < 100%，仍在给数一侧", r3.ok)
+        assertEquals("5 段必须全部合并", 5, r3.mergedRuns)
+        assertEquals("距离", 0.17456312838448484, r3.distanceM, tol)
+        assertEquals("窗口起点", 240, r3.windowStart)
+        assertEquals("窗口终点", 979, r3.windowEnd)
+        assertEquals("裸积分", 0.33416549606255624, r3.bareM, 1e-6)
+        assertEquals("模型分歧", 0.1596023676780714, r3.modelGapM, 1e-6)
+        assertEquals("这段只留了 0.29 s 静止", 0.2854203, r3.tailStaticS, 1e-6)
+        assertFalse("0.285 < 0.5·0.268，没触发", r3.anchorSuspect)
+        assertFalse("91% 还没到拒答线", r3.modelSensitive)
     }
 
     @Test

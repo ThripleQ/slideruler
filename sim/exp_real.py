@@ -3,8 +3,10 @@
 仿真能证明"数学推导和实现对不对"，证明不了"真机的噪声是不是这个模型"
 （ChatGPT 也提醒过这点）。所以仿真上再漂亮，回真机退化就是退化。
 
-真值：只有 3 条是用户肉眼估的 15 cm（本身 ±0.5 cm），只能看趋势、不能当精密基准。
-其余 38 条没有真值，只能看**自洽性**：平台宽度、模型敏感性、拒答率有没有变差。
+真值：分三档，别混（见下方 TRUTH_CM 的注释）。
+最有用的那档是 2026-10-16 手操 20 cm 的 4 条：真值本身 ±1 cm（粗），
+但**终点锚点终于干净**（点按式 + 滑完按住不动）。单列脚本 `sim/exp_20cm.py`。
+其余没有真值的采集只能看**自洽性**：平台宽度、模型敏感性、拒答率有没有变差。
 
 用法：
     python sim/exp_real.py                 # v4 全开
@@ -24,21 +26,35 @@ import measure2
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
                     "android", "captures", "slideruler")
 
-# 真值（cm）。两档可信度，别混为一谈：
+# 真值（cm）。三档，**别混为一谈** —— 前两档是"尺子准不准"，第三档是"数据干不干净"：
 #   HARD —— 2026-10-11 14:37 用 15 cm 直尺测的三次，用户明确"姿态比较随意"。
-#           这是本项目第一批**硬真值**，能判到 1% 量级。
+#           ⚠ 但这三条的**终点锚点在动**（|V_anchor|/v_peak = 0.90~1.01，见
+#             sim/exp_anchor2.py）：标为"静止"的那 0.143 s 里积分速度等于运动峰值
+#             速度，"松手"那一刻手机还在滑。⟹ **三条全部不可用**，不是精密基准。
+#             保留在册只为让历史回归的数字不被改写。
 #   SOFT —— 用户肉眼估的 15 cm，本身 ±0.5 cm（±3.3%），只能看趋势。
-TRUTH_CM = {
-    "20261011_143719": 15.0,
-    "20261011_143725": 15.0,
-    "20261011_143734": 15.0,
-}
-HARD = set(TRUTH_CM)
-TRUTH_CM.update({
-    "20261011_100444": 15.0,
-    "20261011_100459": 15.0,
-    "20261011_100529": 15.0,
-})
+#   HAND20 —— 2026-10-16 23:05~23:07，换 20 cm 尺子重采、**整场手操**。
+#             用户自报操作精度 ±1 cm（±5%）—— 真值本身比上面两档都粗。
+#             但它换来了这一年里唯一"数据可信"的一批：终点锚点干净
+#             （松手后静止 0.29~3.88 s，锚点漂移 0.012~0.072 m/s），
+#             起点锚点也干净（角噪声 0.0002~0.0006 rad/s，桌面受控档）。
+#             有效 4 条 = 用户划的 A 组里排除 230616（操作失误，引擎也独立拒答）。
+#             前 4 条（230336/230414/230434/230452）同组但用户判"没练好"，不入册。
+HARD = {"20261011_143719", "20261011_143725", "20261011_143734"}
+SOFT = {"20261011_100444", "20261011_100459", "20261011_100529"}
+HAND20 = {"20261016_230538", "20261016_230558",
+          "20261016_230634", "20261016_230651"}
+TRUTH_CM = {nm: 15.0 for nm in HARD | SOFT}
+TRUTH_CM.update({nm: 20.0 for nm in HAND20})
+
+
+def tier_of(nm):
+    """真值分档标签。有三档，永远不要把它们平均到一起。"""
+    if nm in HARD:
+        return "硬"
+    if nm in HAND20:
+        return "手操20"
+    return "估"
 
 
 def load(d):
@@ -103,10 +119,10 @@ def main():
         n_ok += 1
         v = m["distanceM"] * 100
         t = TRUTH_CM.get(nm)
+        tier = tier_of(nm)
         note = ""
         if t:
-            note = ("真值%.1f(硬) %+.1f%%" if nm in HARD else "真值%.1f(估) %+.1f%%") % (
-                t, (v - t) / t * 100)
+            note = "真值%.1f(%s) %+.1f%%" % (t, tier, (v - t) / t * 100)
         if m.get("modelSensitive"):
             note += " ⚠模型敏感"
         rows.append((nm, v, m.get("imuDistM", 0) * 100, m.get("leverM", 0) * 100,
@@ -118,14 +134,17 @@ def main():
 
     print("-" * 104)
     print("给出数值 %d / 拒答 %d" % (n_ok, n_rej))
-    for tag, sel in (("硬真值", [r for r in rows if r[0] in HARD]),
-                     ("肉眼估", [r for r in rows if r[6] and r[0] not in HARD])):
+    for tag, tier, absunc in (("硬真值(锚点在动,不可用)", "硬", 0.5),
+                              ("肉眼估", "估", 0.5),
+                              ("手操20cm(±1cm)", "手操20", 1.0)):
+        sel = [r for r in rows if r[6] and tier_of(r[0]) == tier]
         if not sel:
             continue
-        errs = [(r[1] - r[6]) / r[6] * 100 for r in sel]
-        print("%s %d 条相对误差：%s  平均 %+.2f%%  最大 |%.2f%%|"
-              % (tag, len(errs), "  ".join("%+.1f%%" % e for e in errs),
-                 statistics.fmean(errs), max(abs(e) for e in errs)))
+        errs = [(r[1] - r[6]) for r in sel]
+        rel = [e / r[6] * 100 for e, r in zip(errs, sel)]
+        print("%s %d 条：相对误差 %s  平均 %+.2f%%  绝对误差中位 %+.2f cm（真值自身 ±%.1f cm）"
+              % (tag, len(rel), "  ".join("%+.1f%%" % e for e in rel),
+                 statistics.fmean(rel), statistics.median(errs), absunc))
     if rows:
         print("平台宽度中位数 %.2f cm" % statistics.median(
             [r[4][1] - r[4][0] for r in rows]))

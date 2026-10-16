@@ -65,7 +65,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import measure2 as M
-from exp_real import load, TRUTH_CM, HARD, ROOT
+from exp_real import load, TRUTH_CM, tier_of, ROOT
 
 
 def main():
@@ -102,7 +102,7 @@ def main():
         t = TRUTH_CM.get(nm)
         note = ("可疑" if susp else "")
         if t:
-            note += ("  " if note else "") + "真值%.1f%s" % (t, "(硬)" if nm in HARD else "(估)")
+            note += ("  " if note else "") + "真值%.1f(%s)" % (t, tier_of(nm))
             if m.get("ok"):
                 note += " %+.1f%%" % ((m["distanceM"] * 100 - t) / t * 100)
             else:
