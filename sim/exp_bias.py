@@ -128,7 +128,12 @@ def residual_in_runs(a_lin, runs):
 def run_one(nm, verbose=True):
     acc, gyr, dn, up, dt = load(os.path.join(ROOT, nm))
     m = M.measure(acc, gyr, dn, up, dt=dt, merge_mode="press", head_r=None, gate_motion=False)
-    if not m["ok"]:
+    # ⚠ 这里**不能**用 `m["ok"]`：模型敏感现在直接拒答（measure2.py §8），
+    # 而本实验研究的正是"零偏/残差模型对结果的影响"，恰恰需要那条
+    # （143734 就是模型敏感的那条，把它跳过这个实验就少了最关键的样本）。
+    # 拒答返回里 window/run0/run1/cal 都在，够这里继续算 —— 只有"找不到两端锚点"
+    # 的早期拒答才真的算不了。
+    if "run0" not in m or "run1" not in m:
         return None
     flags = m["flags"]
     runs = static_runs_of(flags)

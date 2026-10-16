@@ -70,7 +70,10 @@ def run(nm, fix1=True, fix2=False, gate_mode="mag"):
     acc, gyr, dn, up, dt = load(os.path.join(ROOT, nm))
     m = M.measure(acc, gyr, dn, up, dt=dt, merge_mode="press",
                   head_r=None, gate_motion=False)
-    if not m["ok"]:
+    # ⚠ 不能用 `m["ok"]`：模型敏感现在直接拒答（measure2.py §8），而 143734
+    # 正是那条 —— 本实验要诊断它，跳过就没意义了。拒答返回里 cal/run0/run1/flags/gMag
+    # 都在，够这里继续算；只有"找不到两端锚点"的早期拒答才真算不了。
+    if "run0" not in m:
         return None, m["reason"], None
     ca, cb = m["cal"]
     r0, r1 = m["run0"], m["run1"]
@@ -104,10 +107,16 @@ def main():
         for fx1, fx2 in [(False, False), (True, False), (True, True)]:
             d, why, extra = run(nm, fix1=fx1, fix2=fx2)
             out.append((d, why, extra))
-        base = out[0][0] or 0.0
-        f1 = out[1][0] or 0.0
-        f12 = out[2][0] or 0.0
-        print("%-16s %6.1f | %8.2f %9.2f %9.2f" % (nm, t or -1, base, f1, f12))
+        base = out[0][0]
+        f1 = out[1][0]
+        f12 = out[2][0]
+
+        # 拒答（143734 现在由模型敏感拒答）要显示"拒答"而不是 0.00 ——
+        # 否则那一列看起来像"算法把它测没了"（−100%），实际是引擎明确拒绝给数。
+        def cell(v):
+            return "     拒答" if v is None else "%8.2f" % v
+
+        print("%-16s %6.1f | %s %s %s" % (nm, t or -1, cell(base), cell(f1), cell(f12)))
         for tag, (d, why, extra) in zip(("现状", "F1", "F1+F2"), out):
             if extra:
                 print("      %-6s 静止段残余 %.3f / %.3f m/s²  锚点漂移 %.3f m/s"
@@ -115,7 +124,8 @@ def main():
         rows.append((nm, t, base, f1, f12))
 
     print("-" * 60)
-    got = [r for r in rows if r[1]]
+    # 统计只涵盖三条都给出数的那些（拒答的不能按 0 算）。
+    got = [r for r in rows if r[1] and all(r[i] is not None for i in (2, 3, 4))]
     if got:
         for i, tag in enumerate(("现状", "只修F1", "F1+F2"), start=2):
             errs = [(r[i] - r[1]) / r[1] * 100 for r in got]
