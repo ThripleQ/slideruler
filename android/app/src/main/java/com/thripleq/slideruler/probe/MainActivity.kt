@@ -390,15 +390,22 @@ class MainActivity : ComponentActivity() {
         if (!r.ok) return r.failReason ?: "测距失败"
         if (r.noMotion) return "手机没动（未检测到运动）"
         if (r.slowMotion) return "移动太慢，分辨不出 —— 请快速滑完"
-        // 模型分歧是最高优先级的坏消息：平台窄只说明端点稳，说明不了残差模型对。
-        // 真机上有四条落进这里（修正量 150%~4587%），它们全都没有独立真值可核对。
-        if (r.modelSensitive) {
+        // 模型分歧不再在这里给数：它现在已经直接拒答（failReason 由上面 !r.ok 显示）。
+        // 原因是 143734 那条 —— 原先照给 1.44 cm 再附一句"不可当真"，可 1.44 cm
+        // 是个**体面的**数字，用户没有真值可核对，只会照着读。
+        //
+        // 终点锚点可疑：标为「静止」的那段里积分速度还有多少。
+        // 「松手」不等于「停住」—— 手离开后手机常常还在滑，而**匀速移动与静止在
+        // 加速度计上完全不可分辨**（测的是比力，匀速时比力就是重力），静止检测必然
+        // 把它判成静止。双锚点于是照假设把真实位移当漂移扣掉：真机 143734（真值 15 cm）
+        // 扣掉 15.4 cm，16.19 → 1.59 cm。不拒答（判据没有干净分界线，见 anchorSuspect），
+        // 但必须直说 —— 这是本项目目前最贵的一个误差源。
+        if (r.anchorSuspect) {
             return String.format(
-                Locale.US, "不可当真：这个数由残差模型决定，不是由数据决定 —— " +
-                    "裸积分 %.2f cm、去趋势 %.2f cm，修正量是答案的 %.0f%%。" +
-                    "平台窄只说明端点稳。请重滑一次（快一点、起手和收手都停稳）",
-                r.bareM * 100, r.distanceM * 100,
-                r.modelGapM / maxOf(r.distanceM, 1e-9) * 100,
+                Locale.US, "终点锚点可疑：标为「静止」的那段里积分速度还有 %.2f m/s，" +
+                    "与运动段速度峰值 %.2f m/s 同量级 —— 手离开后手机很可能还在匀速滑，" +
+                    "而匀速和静止在加速度计上分不出来。松手后请把手机按住别动，再滑一次",
+                r.anchorDrift, r.vPeakMps,
             )
         }
         // 滑太慢：陀螺零偏游走 → 姿态漂移 → 重力泄漏，误差随时长**立方**增长。
@@ -450,8 +457,10 @@ class MainActivity : ComponentActivity() {
             )
             appendLine(
                 String.format(
-                    Locale.US, "松手后留下的静止 %.2f s（终点锚点）  锚点漂移 %.5f m/s",
-                    r.tailStaticS, r.anchorDrift,
+                    Locale.US, "松手后留下的静止 %.2f s（终点锚点）  锚点漂移 %.5f m/s   " +
+                        "运动峰值 %.5f m/s%s",
+                    r.tailStaticS, r.anchorDrift, r.vPeakMps,
+                    if (r.anchorSuspect) "   ⚠ 锚点在动（速度/峰值 >0.5）" else "",
                 )
             )
             appendLine(

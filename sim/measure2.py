@@ -629,6 +629,28 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
     t_win = (w1 - w0) * dt
     att_budget = attitude_drift_budget(g_mag, gyr_inst, gyr_tau, t_win)
 
+    # ---- 6d. 锚点可信度：松手之后手机到底停了没有 ----
+    # 「松手」不等于「停住」：手离开后手机常常还在滑。而**匀速滑动与静止在加速度计上
+    # 完全不可分辨**（它测的是比力，匀速时比力就是重力），静止检测必然把这段判成静止。
+    # v3 那条教训（匀速段把一次滑动切碎）当时只用来改**运动段**判据，没意识到它同样
+    # 毁掉**终点锚点** —— 而终点锚点正是双锚点里"把漂移钉回零"的那一半。
+    #
+    # 实测 20261011_143734（真值 15 cm，原报 1.44 cm）：
+    #   终点锚点段 0.143 s 内积分速度稳定在 −0.31 m/s，运动段速度峰值才 0.314 m/s；
+    #   双锚点照假设把它当零，扣掉 15.42 cm **真实位移**，16.19 → 1.59 cm。
+    #   同一条的起点锚点 |V0| = 0.007 m/s（真静止）—— 问题只在终点一侧。
+    #
+    # 这里**只诊断、不拒答**：判据没有干净的分界线。143725 的锚点速度 0.215 m/s
+    # 同样接近它自己的运动峰值 0.238 m/s，却给出 +5% 的正确读数（两个错误互相抵消）。
+    # 拿 3~6 条真值去拟合一条分界线，等于用真值调参 —— 本项目不做这件事。
+    v_win, _ = integrate_from(a_lin, w0, w1, dt)
+    v_pk = (max(vnorm(v_win[k]) for k in range(m0 - w0, m1 - w0 + 1))
+            if m1 > m0 else 0.0)
+    # 下限 0.05 m/s：运动段速度峰值本身就接近零时（122256 只有 0.003 m/s，几乎是没动），
+    # 比值是两个噪声相除，没有意义。
+    anchor_suspect = v_pk > 0.05 and anchor_drift > 0.5 * v_pk
+
+
     # ---- 7. 平台宽度：窗口端点在静止段内挪动，答案变化多少 ----
     grid0, grid1 = [], []
     for k in range(PLATEAU_GRID):
@@ -653,6 +675,7 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
            "leverM": vnorm(d_lever), "bareM": bare_head, "bareImuM": bare,
            "plateau": plateau,
            "anchorDrift": anchor_drift, "runSpread": run_spread,
+           "vPeakMps": v_pk, "anchorSuspect": anchor_suspect,
            "modelGapM": model_gap, "modelSensitive": model_sensitive,
            "T": (w1 - w0) * dt, "holdS": (up_i - down_i) * dt,
            "motionS": (m1 - m0) * dt, "dt": dt,
@@ -685,8 +708,33 @@ def measure(acc, gyr, down_i, up_i, dt=None, tail_s=TAIL_S, verbose=False, quad=
         warns.append("这个数由残差模型决定，不是由数据决定：裸积分 %.2f cm、去趋势 %.2f cm，"
                      "修正量是答案的 %.0f%% —— 平台窄只说明端点稳，说明不了模型对"
                      % (bare * 100, dist * 100, model_gap / max(dist, 1e-9) * 100))
+    if anchor_suspect:
+        # 不拒答、只提醒：这条判据没有干净分界线（见 6d 的注释）。
+        # 但它是 143734 那个 15 cm → 1.44 cm 的病根，值得直说。
+        warns.append("终点锚点可疑：标为「静止」的那段里积分速度还有 %.3f m/s，"
+                     "与运动段速度峰值 %.3f m/s 同量级 —— 手离开后手机可能还在匀速滑，"
+                     "而匀速和静止在加速度计上分不出来。松手后请把手机按住别动"
+                     % (anchor_drift, v_pk))
     if warns:
         out["warn"] = "；".join(warns)
+
+    # ---- 8. 模型敏感 → 拒答（不再"给数 + 点名"）----
+    # 原则是"宁可拒答，也不要一个像样的假数"。modelSensitive 的物理含义本来就是
+    # "这个数由模型假设决定、不是由数据决定" —— 那它不该给数。
+    # 原先照给再点名，实测后果：143734 报 1.44 cm 并附带一句"不可当真"，
+    # 但 1.44 cm 是个**体面的**数字，用户没有真值可核对，只会照着读。
+    # 全库 32 条给数里有 8 条落进这里，其中**只有 143734 有独立真值，而它是错的**；
+    # 另一侧已知正确的 5 条（143719/143725/100444/100459/100529）一条都不在名单里。
+    #
+    # 放在平台扫描**之后**：这样拒答与给数的字段完全一致（含 plateau），
+    # 诊断和被拒的那条本身都还能看。代价是一次白扫，可忽略。
+    if model_sensitive:
+        return {**out, "ok": False,
+                "reason": "这个数由残差模型决定、不是由数据决定（裸积分 %.2f cm、"
+                          "去趋势 %.2f cm，修正量是答案的 %.0f%%）—— 平台窄只说明端点稳，"
+                          "说明不了模型对。请重滑一次：快一点、起手和收手都停稳"
+                          % (bare_head * 100, dist_head * 100,
+                             model_gap / max(dist_head, 1e-9) * 100)}
     return out
 
 

@@ -1,5 +1,6 @@
 package com.thripleq.slideruler.probe
 
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -65,6 +66,9 @@ private const val PLATEAU_GRID = 5         // 平台扫描点数
 // 「修正量相对答案」的上限：|裸积分 − 去趋势| 超过 max(答案, 该下限) 就报"模型敏感"。
 // 0.02 m 这个下限是为了避免小距离时被绝对噪声误报。
 private const val MODEL_GAP_FLOOR_M = 0.02
+// 运动段速度峰值低于此值时，「锚点速度 / 运动峰值」是两个噪声相除，判据无意义
+// （真机 122256 的运动峰值只有 0.003 m/s，几乎没动，比值却到 1.03）。
+private const val ANCHOR_MIN_PEAK_MPS = 0.05
 private const val MIN_SAMPLES = 40
 
 /** 一条三轴样本。用 Double 而不是 Float，是为了让单测能与 Python 逐位对齐。 */
@@ -77,8 +81,11 @@ fun Sample.toPt3(): Pt3 = Pt3(tNs, x.toDouble(), y.toDouble(), z.toDouble())
  *
  * 除了距离，刻意把「引擎看到的证据」一并带出来 —— 用户需要知道这一次可不可信：
  * [confidence] 是自带的误差棒，[noMotion]/[slowMotion]/[endHitBound] 是三种"没测好"的具体原因。
+ *
+ * `data class` 是为了 `copy()` —— 模型敏感时要把同一个结果翻成"拒答"，
+ * 又不想把三十来个字段再抄一遍（抄一遍就会与成功路径漂移）。
  */
-class MeasureResult(
+data class MeasureResult(
     val ok: Boolean,
     val failReason: String? = null,
     /** **测量头**的净位移（米）。headR 全 0 时等于 [imuDistM]。 */
@@ -139,6 +146,21 @@ class MeasureResult(
      * 保守上界（假设游走全朝一个方向），只作操作引导，不据此拒答。
      */
     val attBudgetM: Double = 0.0,
+    /** 窗口内**运动段**上裸速度的峰值（米/秒）。只用来判断终点锚点可信度。 */
+    val vPeakMps: Double = 0.0,
+    /**
+     * 终点锚点可疑：标为「静止」的那段里，积分速度与运动段速度峰值同量级。
+     *
+     * 「松手」不等于「停住」，而**匀速移动与静止在加速度计上完全不可分辨**（测的是比力，
+     * 匀速时比力就是重力）—— 静止检测必然把匀速段判成静止。双锚点于是照假设把它当零，
+     * 把**真实位移**当漂移扣掉：真机 20261011_143734（真值 15 cm）终点锚点段速度
+     * 0.316 m/s、运动段峰值 0.314 m/s，扣掉 15.42 cm，16.19 → 1.59 cm。
+     * v3 那条教训（匀速段把一次滑动切碎）当时只用来改运动段判据，没意识到它同样毁掉锚点。
+     *
+     * **只诊断、不拒答**：143725 同样可疑（0.90）却给出 +5% 的正确读数（两个错误互相抵消）。
+     * 这条判据没有干净的分界线，拿它拒答等于拿真值调参 —— 本项目不做。
+     */
+    val anchorSuspect: Boolean = false,
 ) {
     val distanceCm: Double get() = distanceM * 100.0
     val plateauLoCm: Double get() = plateauLoM * 100.0
@@ -388,7 +410,17 @@ object SlideMeasure {
         }
 
         // ---- 6. 姿态（加速度修正只在静止段开，运动中纯陀螺外推）----
-        val qs = solveAttitude(ax, ay, az, gx, gy, gz, bias, gRef, flags, dt,
+        // 按钮窗内一律不做加速度修正：那段时间手机在动，acc = 重力 + 运动加速度，
+        // 它的方向**不是**重力方向。只影响姿态，不影响锚点搜索 —— 锚点仍用原始静止判据找。
+        //
+        // ⚠ 这一条移植时漏过（Python 有、Kotlin 没有），后果是 v4 的关键改动在设备端失效：
+        //   flags 与 gate_flags 平时看不出差别，因为运动段的 |acc| 偏离 |g| 很大、
+        //   门控本来就会拒；但**匀速段**的 |‖acc‖−g| ≈ 0 **会被门控放行** ——
+        //   而匀速段恰恰是静止检测必然误判成静止的地方（匀速与静止在加速度计上不可分辨）。
+        //   于是那些样本被拿去"修正"姿态，把运动加速度写进了重力方向。
+        //   真机 122416（一次按住切 5 段）两侧因此差 9.4 cm，而单测当时没覆盖这种夹具。
+        val gateFlags = BooleanArray(n) { flags[it] && (it < dn || it > up) }
+        val qs = solveAttitude(ax, ay, az, gx, gy, gz, bias, gRef, gateFlags, dt,
             i0 = calLo, gMag = gMag)
 
         // ---- 7. 去重力（用实测 |g|，不是 9.81）----
@@ -455,7 +487,11 @@ object SlideMeasure {
         val inst = gyroBiasInstability(gx, gy, gz, run0, dt)
         val attBudget = attitudeDriftBudget(gMag, inst[0], inst[1], (w1 - w0) * dt)
 
-        return MeasureResult(
+        // ---- 11. 终点锚点可信度（只诊断，不拒答；理由见 MeasureResult.anchorSuspect）----
+        val vPeak = motionVelPeak(lx, ly, lz, w0, w1, m0, m1, dt)
+        val anchorSuspect = vPeak > ANCHOR_MIN_PEAK_MPS && zupt.anchorDrift > 0.5 * vPeak
+
+        val out = MeasureResult(
             ok = true,
             distanceM = distHead,
             imuDistM = zupt.distanceM,
@@ -485,7 +521,30 @@ object SlideMeasure {
             gyroInstability = inst[0],
             gyroInstTauS = inst[1],
             attBudgetM = attBudget,
+            vPeakMps = vPeak,
+            anchorSuspect = anchorSuspect,
         )
+
+        // ---- 12. 模型敏感 → 拒答（不再"给数 + 点名"）----
+        // 原则是"宁可拒答，也不要一个像样的假数"。modelSensitive 的物理含义本来就是
+        // "这个数由模型假设决定、不是由数据决定" —— 那它不该给数。
+        // 原先照给再点名，实测后果：143734 报 1.44 cm 并附带一句"不可当真"，
+        // 但 1.44 cm 是个**体面的**数字，用户没有真值可核对，只会照着读。
+        // 全库 32 条给数里有 8 条落进这里，其中**只有 143734 有独立真值，而它是错的**；
+        // 另一侧已知正确的 5 条（143719/143725/100444/100459/100529）一条都不在名单里。
+        // 用 copy 而不是另写一份构造：拒答与给数的字段完全一致（含平台），
+        // 被拒的那条自己仍然看得清，两边实现也好逐位对照。
+        if (modelSensitive) {
+            return out.copy(
+                ok = false,
+                failReason = String.format(Locale.US,
+                    "这个数由残差模型决定、不是由数据决定（裸积分 %.2f cm、去趋势 %.2f cm，" +
+                        "修正量是答案的 %.0f%%）—— 平台窄只说明端点稳，说明不了模型对。" +
+                        "请重滑一次：快一点、起手和收手都停稳",
+                    bare * 100, distHead * 100, modelGap / max(distHead, 1e-9) * 100),
+            )
+        }
+        return out
     }
 }
 
@@ -668,6 +727,31 @@ private fun integrateEndVec(lx: DoubleArray, ly: DoubleArray, lz: DoubleArray,
         vx = nx; vy = ny; vz = nz
     }
     return doubleArrayOf(px, py, pz)
+}
+
+/**
+ * 窗口内裸速度在**运动段** [m0, m1] 上的峰值（米/秒）。
+ *
+ * 只服务于 [MeasureResult.anchorSuspect]：如果标为「静止」的锚点段里那个速度，
+ * 和运动段的速度峰值同量级，说明锚点段其实还在动。与 [integrateEndVec] 同一套梯形积分。
+ */
+private fun motionVelPeak(lx: DoubleArray, ly: DoubleArray, lz: DoubleArray,
+                          w0: Int, w1: Int, m0: Int, m1: Int, dt: Double): Double {
+    var vx = 0.0
+    var vy = 0.0
+    var vz = 0.0
+    var pk = 0.0
+    for (k in 1..(w1 - w0)) {
+        val i = w0 + k
+        vx += 0.5 * (lx[i - 1] + lx[i]) * dt
+        vy += 0.5 * (ly[i - 1] + ly[i]) * dt
+        vz += 0.5 * (lz[i - 1] + lz[i]) * dt
+        if (i in m0..m1) {
+            val s = sqrt(vx * vx + vy * vy + vz * vz)
+            if (s > pk) pk = s
+        }
+    }
+    return pk
 }
 
 private fun integrateEnd(lx: DoubleArray, ly: DoubleArray, lz: DoubleArray,

@@ -93,11 +93,12 @@ class SlideMeasureTest {
      * 也是最强的操作杠杆：滑快一倍，误差降到 1/8。
      *
      * 硬真值（15 cm 直尺，2026-10-11）：
-     *  · 143734 滑 0.69 s → 预算 5.4 cm，实际误差 1.4 cm；
-     *  · 143719 滑 1.44 s → 预算 27.4 cm，实际误差 3.1 cm；
-     *  · 143725 滑 1.49 s → 预算 35.7 cm，实际误差 1.2 cm。
-     * 预算是保守上界，但 T 的立方关系与实际误差的走向一致 —— 滑得慢的那两条
-     * 误差方向都开始乱（−21% / +8%），快的那个方向一致（−89% 是窗口问题，另案）。
+     *  · 143734 滑 0.69 s → 预算 5.4 cm，但它是错的（−90%）并且**拒答** ——
+     *    病因不是漂移而是终点锚点（松手后手机还在匀速滑，见 `终点锚点在动` 那条测试）；
+     *  · 143719 滑 1.44 s → 预算 27.4 cm，报 11.7 cm（−22%）；
+     *  · 143725 滑 1.49 s → 预算 35.7 cm，报 15.8 cm（+5%）。
+     * ⚠ 预算与误差**不是**单调的：预算 5.4 cm 的那条错得最狠，预算 35.7 cm 的那条
+     * 反而最准。上界只管"零偏 → 重力泄漏"这一项，**不覆盖锚点失效**。
      * 期望值由 sim/measure2.py 在同一份夹具上产出。
      */
     @Test
@@ -121,6 +122,31 @@ class SlideMeasureTest {
         assertEquals("姿态漂移上界 27.4 cm", 0.27445291659455828, rg.attBudgetM, tol)
         assertTrue("预算 27.4 cm > 读数 11.9 cm —— 慢滑动报警的判据成立",
             rg.attBudgetM > rg.distanceM)
+    }
+
+    /**
+     * 按钮窗内禁止加速度修正 —— 别让「匀速段」污染姿态。
+     *
+     * 122416 是一次病态按住：静止检测把一次滑动切成了 5 段，而被判成静止的那些
+     * **匀速段**样本，其 |‖acc‖−g| ≈ 0，**能通过模长门控**。
+     * 姿态解算若只按 `flags` 放行（Python 用 `gate_flags` 额外排除按钮窗），
+     * 它们就会被拿去"修正"姿态，把运动加速度写进重力方向。
+     *
+     * ⚠ 这是 v4 的关键改动，Kotlin 移植时漏了：修之前两侧在这条夹具上差 9.4 cm
+     * （Kotlin 1.4688 / Python 1.5632），而**其他夹具全都看不出来** ——
+     * 正常数据的运动段 |‖acc‖−g| 很大，门控本来就会拒，放行与不放行结果相同。
+     * 所以这条夹具是这套判据唯一的守卫，期望值由 sim/measure2.py 产出。
+     */
+    @Test
+    fun `按钮窗内禁止加速度修正 - 匀速段不许污染姿态`() {
+        val f = load("20261011_122416")
+        val r = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs)
+        assertEquals("裸积分（姿态一旦被污染，这里最先变）",
+            5.570952399021404, r.bareM, 1e-9)
+        assertEquals("锚点漂移", 3.6199266330942566, r.anchorDrift, 1e-9)
+        assertEquals("距离（只作诊断，不展示给用户）", 1.563247657506976, r.distanceM, 1e-6)
+        assertEquals("区间选择与姿态无关，不受影响", 256, r.motionIndex)
+        assertFalse("这个数由模型决定 → 拒答", r.ok)
     }
 
     @Test
@@ -193,9 +219,9 @@ class SlideMeasureTest {
         val f = load("20261011_100409")
         val r = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs)
         assertTrue(r.ok)
-        assertEquals("距离", 0.068495773219678827, r.distanceM, tol)
-        assertEquals("平台下界", 0.063128874735805363, r.plateauLoM, tol)
-        assertEquals("平台上界", 0.076192867045050169, r.plateauHiM, tol)
+        assertEquals("距离", 0.068496449074256685, r.distanceM, tol)
+        assertEquals("平台下界", 0.063128874735805085, r.plateauLoM, tol)
+        assertEquals("平台上界", 0.076194522295233283, r.plateauHiM, tol)
         assertEquals(400, r.motionIndex)
         assertEquals(385, r.windowStart)
         assertEquals(694, r.windowEnd)
@@ -221,21 +247,35 @@ class SlideMeasureTest {
      * 而没有真值的那批（150% / 260% / 590% / 4587%）全超。见 sim/compare_v1_v2.py。
      */
     @Test
-    fun `修正量超过答案本身 - 必须判为模型敏感而不是高可信`() {
+    fun `修正量超过答案本身 - 必须拒答而不是给一个体面的数`() {
         val f = load("20261011_122416")
         val r = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs)
-        assertTrue(r.ok)
-        assertEquals("裸积分", 5.370998356219733, r.bareM, 1e-6)
-        assertEquals("模型分歧", 3.9022209851532157, r.modelGapM, 1e-6)
-        assertTrue("修正量是答案的 2.7 倍 → 必须报模型敏感", r.modelSensitive)
-        assertEquals("锚点漂移", 3.4695023245087975, r.anchorDrift, 1e-9)
+        // 原先这里是 assertTrue(r.ok)，然后给出 147 cm 再挂一句"不可当真"。
+        // 现在改成拒答：点名的同时给数，实测后果是用户照着读 —— 143734 报 1.44 cm
+        // 就是个**体面的**错数（1.44 看起来完全正常，而真值是 15）。
+        assertFalse("修正量是答案的 2.7 倍 → 必须拒答", r.ok)
+        assertTrue("拒答也要由模型敏感旗标点名", r.modelSensitive)
+        assertTrue(
+            "理由要说清是模型决定的：${r.failReason}",
+            r.failReason!!.contains("残差模型决定"),
+        )
+        // 拒答了也要把证据留下，否则这条数据就再也看不清楚了
+        assertEquals("裸积分", 5.570952399021404, r.bareM, 1e-6)
+        assertEquals("模型分歧", 4.007704741514427, r.modelGapM, 1e-6)
+        assertEquals("锚点漂移", 3.6199266330942566, r.anchorDrift, 1e-9)
+        assertEquals("运动段速度峰值", 3.4154004650754186, r.vPeakMps, 1e-9)
+        assertTrue("3.62 vs 3.42 m/s —— 锚点也在动", r.anchorSuspect)
+        assertEquals("平台照算（拒答的条同样看得清）",
+            1.2122176967837292, r.plateauLoM, 1e-6)
 
-        // 对照：修正量只有 21% 的那条不该触发 —— 判据不能把所有去趋势都当成可疑
+        // 对照：修正量只有 21% 的那条必须继续给数 —— 判据不能把所有去趋势都当成可疑
         val g = load("20261011_100459")
         val rg = SlideMeasure.measure(g.acc, g.gyr, g.downNs, g.upNs)
+        assertTrue("100459 必须给数", rg.ok)
+        assertFalse("21% < 100%，不该报模型敏感", rg.modelSensitive)
+        assertFalse("锚点没在动（0.025 vs 0.155 m/s）", rg.anchorSuspect)
         assertEquals("裸积分", 0.12411948074406344, rg.bareM, 1e-6)
         assertEquals("模型分歧", 0.03341495166930615, rg.modelGapM, 1e-6)
-        assertFalse("21% < 100%，不该报模型敏感", rg.modelSensitive)
     }
 
     /**
@@ -341,20 +381,59 @@ class SlideMeasureTest {
      * 延续到松手之后，它在按钮窗内的重叠只有 0.24 s，输给了完全落在窗内的 0.29 s 抖动。
      *
      * 这里锁的是**区间选择**，不是距离精度：合并后必须覆盖 #256→#638。
-     * 至于这个数本身 —— 平台 122~328 cm，`modelSensitive` 必须为真。
+     * 至于这个数本身 —— 平台 121~323 cm、修正量是答案的 2.6 倍，
+     * `modelSensitive` 必须为真，所以这条现在**拒答**（只留诊断用的距离）。
      * 报一个明摆着离谱的数，好过报一个 0.59 cm 这种"看着体面但错"的数。
      */
     @Test
     fun `一次按住里的多段运动必须合并 - 不许切碎滑动`() {
         val f = load("20261011_122416")
         val r = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs)
-        assertTrue(r.ok)
+        // 区间选择是这条测试真正锁的东西 —— 拒答不影响它，字段照旧带着
         assertEquals("合并后的运动区间起点", 256, r.motionIndex)
         assertEquals("窗口起点", 241, r.windowStart)
         assertEquals("窗口终点", 653, r.windowEnd)
         assertEquals("这次按住被静止检测切成了 5 段，必须全部合并", 5, r.mergedRuns)
-        assertEquals("距离", 1.4687773710665171, r.distanceM, tol)
-        assertTrue("这个数必须由模型敏感旗标点名", r.modelSensitive)
+        assertEquals("距离（只作诊断，不展示给用户）", 1.563247657506976, r.distanceM, tol)
+        assertFalse("这个数由模型决定 → 拒答", r.ok)
+        assertTrue("拒答由模型敏感旗标点名", r.modelSensitive)
+    }
+
+    /**
+     * 终点锚点在动 —— 「松手」不等于「停住」。
+     *
+     * 143734（15 cm 硬真值）是本项目最贵的一条：**裸积分 16.19 cm 本来是对的**，
+     * 双锚点扣掉 15.42 cm，报 1.44 cm。扣掉的不是漂移 —— 终点锚点段（标为「静止」的
+     * 0.143 s）里积分速度稳定在 −0.31 m/s，而运动段速度峰值才 0.314 m/s。也就是
+     * 手离开后手机还在匀速滑，而**匀速移动与静止在加速度计上不可分辨**（测的是比力，
+     * 匀速时比力就是重力），静止检测必然把它判成静止。同一条的起点锚点是真静止
+     * （|V0| = 0.007 m/s），问题只在终点一侧。
+     *
+     * 这条现在同时被两个判据抓到：模型敏感（→ 拒答）与锚点可疑（→ 报警）。
+     * 锚点可疑**不拒答**（143725 同样可疑却给出 +5% 的正确定数，判据没有干净分界线，
+     * 拿它拒答等于用真值调参），所以它必须能单独被观察到 —— 就是这条测试。
+     */
+    @Test
+    fun `终点锚点在动 - 松手后手机还在匀速滑必须报出来`() {
+        val f = load("20261011_143734")
+        val r = SlideMeasure.measure(f.acc, f.gyr, f.downNs, f.upNs)
+        assertTrue("标为「静止」的终点锚点里速度与运动峰值同量级 → 必须点出来", r.anchorSuspect)
+        assertEquals("终点锚点段里的速度", 0.3160358900303602, r.anchorDrift, 1e-9)
+        assertEquals("运动段速度峰值", 0.3136389804577817, r.vPeakMps, 1e-9)
+        assertTrue("两者同量级（比值 1.01）正是可疑的定义", r.anchorDrift > 0.5 * r.vPeakMps)
+        assertFalse("这条同时被模型敏感抓到，所以拒答", r.ok)
+
+        // 对照：同一次实验里正常的那三条，锚点都不该可疑。
+        // 100444/100459/100529 的比值是 0.09 / 0.16 / 0.06，与 143 系列（0.90~1.01）分得很开。
+        for (nm in listOf("20261011_100444", "20261011_100459", "20261011_100529")) {
+            val g = load(nm)
+            val rg = SlideMeasure.measure(g.acc, g.gyr, g.downNs, g.upNs)
+            assertTrue("$nm 必须给数", rg.ok)
+            assertFalse(
+                "$nm 的终点锚点不该可疑（速度 ${rg.anchorDrift} vs 峰值 ${rg.vPeakMps}）",
+                rg.anchorSuspect,
+            )
+        }
     }
 
     /**
@@ -369,10 +448,10 @@ class SlideMeasureTest {
         assertTrue(r.ok)
         assertEquals("合并后起点要包含那段小抖动", 176, r.motionIndex)
         assertEquals("窗内两段被合并", 2, r.mergedRuns)
-        assertEquals("距离", 0.11536674154293602, r.distanceM, tol)
+        assertEquals("距离", 0.11536100593437933, r.distanceM, tol)
         // 注意：Python 的 plateau 导出的单位是 cm，Kotlin 的 plateauLoM/HiM 是 m
-        assertEquals("平台下界 11.36cm", 0.1135608288905269, r.plateauLoM, tol)
-        assertEquals("平台上界 11.79cm", 0.11791511985520732, r.plateauHiM, tol)
+        assertEquals("平台下界 11.36cm", 0.11355627291419963, r.plateauLoM, tol)
+        assertEquals("平台上界 11.79cm", 0.11790594818776837, r.plateauHiM, tol)
         assertFalse("干净数据不该报模型敏感", r.modelSensitive)
     }
 
